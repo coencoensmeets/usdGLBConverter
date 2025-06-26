@@ -3,6 +3,7 @@ import struct
 import logging
 from pxr import Usd, UsdGeom, UsdShade, Gf
 import math
+import numpy as np
 from src.math_utils import quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat
 from src.robot_structure import USDRobot, USDLink, USDJoint, USDMesh
 from typing import List, Tuple, Optional, Dict, Any, Union
@@ -31,12 +32,15 @@ class USDToGLTFConverter:
         self.materials_gltf: List[Dict[str, Any]] = []
         self.accessors: List[Dict[str, Any]] = []
         self.bufferViews: List[Dict[str, Any]] = []
-        self.bin_data: bytes = b''
+        self.bin_data: bytearray = bytearray()  # Use bytearray for better performance
         
         # Mapping from USDLink to glTF node index
         self.link_to_node_idx: Dict[USDLink, int] = {}
         # Mapping from USD material prim to glTF material index
         self.material_to_idx: Dict[Any, int] = {}
+        
+        # Cache for transform calculations
+        self._transform_cache: Dict[Any, Tuple[Gf.Vec3d, Gf.Rotation, Gf.Vec3d]] = {}
 
     def convert_robot_to_gltf(self) -> None:
         """Convert the USDRobot structure directly to glTF format."""
@@ -119,25 +123,6 @@ class USDToGLTFConverter:
 
     def _process_single_mesh(self, usd_mesh: USDMesh, link: USDLink) -> Optional[int]:
         """Process a single mesh primitive and return its glTF mesh index, applying local translation and scale."""
-        def get_local_transform_xform(prim: Usd.Prim) -> Tuple[Gf.Vec3d, Gf.Rotation, Gf.Vec3d]:
-            """
-            Get the local transformation of a prim using Xformable.
-            See https://openusd.org/release/api/class_usd_geom_xformable.html
-            Args:
-                prim: The prim to calculate the local transformation.
-            Returns:
-                A tuple of:
-                - Translation vector.
-                - Rotation quaternion, i.e. 3d vector plus angle.
-                - Scale vector.
-            """
-            xform = UsdGeom.Xformable(prim)
-            local_transformation: Gf.Matrix4d = xform.GetLocalTransformation()
-            translation: Gf.Vec3d = local_transformation.ExtractTranslation()
-            rotation: Gf.Rotation = local_transformation.ExtractRotation()
-            scale: Gf.Vec3d = Gf.Vec3d(*(v.GetLength() for v in local_transformation.ExtractRotationMatrix()))
-            return translation, rotation, scale
-        
         logger.debug(f"Processing single mesh: {usd_mesh.name}")
 
         mesh = UsdGeom.Mesh(usd_mesh.mesh_prim)
@@ -150,45 +135,48 @@ class USDToGLTFConverter:
             return None
 
         logger.debug(f"Mesh has {len(points)} vertices and {len(faceVertexCounts)} faces")
+        if usd_mesh.has_multiple_materials():
+            logger.debug(f"Mesh has multiple materials: {usd_mesh.get_all_material_names()}")
 
-        # Apply local translation, rotation, and scale to points using get_local_transform_xform
-        translation, rotation, scale = get_local_transform_xform(usd_mesh.mesh_prim)
+        # Get cached transform or calculate it
+        mesh_path = str(usd_mesh.mesh_prim.GetPath())
+        if mesh_path not in self._transform_cache:
+            xform = UsdGeom.Xformable(usd_mesh.mesh_prim)
+            local_transformation: Gf.Matrix4d = xform.GetLocalTransformation()
+            translation: Gf.Vec3d = local_transformation.ExtractTranslation()
+            rotation: Gf.Rotation = local_transformation.ExtractRotation()
+            scale: Gf.Vec3d = Gf.Vec3d(*(v.GetLength() for v in local_transformation.ExtractRotationMatrix()))
+            self._transform_cache[mesh_path] = (translation, rotation, scale)
+        
+        translation, rotation, scale = self._transform_cache[mesh_path]
 
-        # Convert rotation (Gf.Rotation) to a rotation matrix
-        rot_matrix = Gf.Matrix3d(rotation.GetQuat())
-
-        transformed_points = []
-        transformed_points = [
-            tuple(
-                (rot_matrix * Gf.Vec3d(pt[0] * scale[0], pt[1] * scale[1], pt[2] * scale[2])) + translation
-            )
-            for pt in points
-        ]
-
-        # Convert mesh data to glTF format
-        vertices = [coord for pt in transformed_points for coord in pt]
-        indices: List[int] = []
-        offset = 0
-
-        for count in faceVertexCounts:
-            if count == 3:
-                indices.extend([
-                    faceVertexIndices[offset],
-                    faceVertexIndices[offset+1],
-                    faceVertexIndices[offset+2]
-                ])
-            offset += count
-
-        # Pack binary data
+        # Optimize point transformation using numpy
+        points_array = np.array([(p[0], p[1], p[2]) for p in points], dtype=np.float32)
+        
+        # Apply scale
+        if scale != Gf.Vec3d(1.0, 1.0, 1.0):
+            scale_array = np.array([scale[0], scale[1], scale[2]], dtype=np.float32)
+            points_array *= scale_array
+        
+        # Apply rotation if not identity
+        if rotation.GetQuat() != Gf.Quatd(1.0, 0.0, 0.0, 0.0):
+            rot_matrix = np.array(Gf.Matrix3d(rotation.GetQuat()), dtype=np.float32)
+            points_array = np.dot(points_array, rot_matrix.T)
+        
+        # Apply translation
+        if translation != Gf.Vec3d(0.0, 0.0, 0.0):
+            translation_array = np.array([translation[0], translation[1], translation[2]], dtype=np.float32)
+            points_array += translation_array
+        
+        # Convert to list for glTF
+        vertices = points_array.flatten().tolist()
+        
+        # Pack binary data for vertices (shared by all primitives)
         v_bin = struct.pack('<' + 'f'*len(vertices), *vertices)
-        i_bin = struct.pack('<' + 'I'*len(indices), *indices)
-
         v_offset = len(self.bin_data)
-        self.bin_data += v_bin
-        i_offset = len(self.bin_data)
-        self.bin_data += i_bin
+        self.bin_data.extend(v_bin)
 
-        # Create buffer views
+        # Create vertex buffer view
         vertex_buffer_view_idx = len(self.bufferViews)
         self.bufferViews.append({
             "buffer": 0,
@@ -197,61 +185,128 @@ class USDToGLTFConverter:
             "target": 34962  # ARRAY_BUFFER
         })
 
-        index_buffer_view_idx = len(self.bufferViews)
-        self.bufferViews.append({
-            "buffer": 0,
-            "byteOffset": i_offset,
-            "byteLength": len(i_bin),
-            "target": 34963  # ELEMENT_ARRAY_BUFFER
-        })
-
-        # Create accessors
+        # Create position accessor with optimized min/max calculation
         position_accessor_idx = len(self.accessors)
-        points_list = [[pt[0], pt[1], pt[2]] for pt in transformed_points]
+        min_coords = points_array.min(axis=0).tolist()
+        max_coords = points_array.max(axis=0).tolist()
+        
         self.accessors.append({
             "bufferView": vertex_buffer_view_idx,
             "byteOffset": 0,
             "componentType": 5126,  # FLOAT
-            "count": len(points_list),
+            "count": len(points_array),
             "type": "VEC3",
-            "max": [float(max(coord)) for coord in zip(*points_list)],
-            "min": [float(min(coord)) for coord in zip(*points_list)]
-        })
-
-        index_accessor_idx = len(self.accessors)
-        self.accessors.append({
-            "bufferView": index_buffer_view_idx,
-            "byteOffset": 0,
-            "componentType": 5125,  # UNSIGNED_INT
-            "count": len(indices),
-            "type": "SCALAR"
+            "max": max_coords,
+            "min": min_coords
         })
 
         # Create glTF mesh
         mesh_name = f"{link.name}_{usd_mesh.name}"
         mesh_idx = len(self.meshes_gltf)
         
-        # Create primitive with attributes and indices
-        primitive = {
-            "attributes": {"POSITION": position_accessor_idx},
-            "indices": index_accessor_idx
-        }
+        # Create primitives - handle multiple materials
+        primitives = []
         
-        # Use the material from the USDMesh if available
-        if usd_mesh.has_material():
-            material_idx = self._process_single_material(usd_mesh.material_prim, link)
-            if material_idx is not None:
-                primitive["material"] = material_idx
-                logger.debug(f"Assigned material {material_idx} to mesh {mesh_name}")
+        if usd_mesh.has_multiple_materials() and usd_mesh.get_geom_subsets_with_materials():
+            # Handle GeomSubsets with different materials
+            for subset_info in usd_mesh.get_geom_subsets_with_materials():
+                geom_subset = subset_info['geom_subset']
+                material_prim = subset_info['material']
+                
+                # Get indices for this subset
+                subset_indices = self._get_geom_subset_indices_optimized(geom_subset, faceVertexIndices, faceVertexCounts)
+                if not subset_indices:
+                    continue
+                
+                # Create index buffer for this subset
+                i_bin = struct.pack('<' + 'I'*len(subset_indices), *subset_indices)
+                i_offset = len(self.bin_data)
+                self.bin_data.extend(i_bin)
+
+                # Create index buffer view
+                index_buffer_view_idx = len(self.bufferViews)
+                self.bufferViews.append({
+                    "buffer": 0,
+                    "byteOffset": i_offset,
+                    "byteLength": len(i_bin),
+                    "target": 34963  # ELEMENT_ARRAY_BUFFER
+                })
+
+                # Create index accessor
+                index_accessor_idx = len(self.accessors)
+                self.accessors.append({
+                    "bufferView": index_buffer_view_idx,
+                    "byteOffset": 0,
+                    "componentType": 5125,  # UNSIGNED_INT
+                    "count": len(subset_indices),
+                    "type": "SCALAR"
+                })
+
+                # Create primitive for this subset
+                primitive = {
+                    "attributes": {"POSITION": position_accessor_idx},
+                    "indices": index_accessor_idx
+                }
+                
+                # Process material for this subset
+                material_idx = self._process_single_material(material_prim, link)
+                if material_idx is not None:
+                    primitive["material"] = material_idx
+                    logger.debug(f"Assigned material {material_idx} ({material_prim.GetName()}) to subset {subset_info['name']}")
+                
+                primitives.append(primitive)
         else:
-            logger.debug(f"Mesh {mesh_name} has no material")
+            # Handle single material or no material (traditional approach) - optimized
+            indices = self._triangulate_faces_optimized(faceVertexIndices, faceVertexCounts)
+
+            # Pack binary data for indices
+            i_bin = struct.pack('<' + 'I'*len(indices), *indices)
+            i_offset = len(self.bin_data)
+            self.bin_data.extend(i_bin)
+
+            # Create index buffer view
+            index_buffer_view_idx = len(self.bufferViews)
+            self.bufferViews.append({
+                "buffer": 0,
+                "byteOffset": i_offset,
+                "byteLength": len(i_bin),
+                "target": 34963  # ELEMENT_ARRAY_BUFFER
+            })
+
+            # Create index accessor
+            index_accessor_idx = len(self.accessors)
+            self.accessors.append({
+                "bufferView": index_buffer_view_idx,
+                "byteOffset": 0,
+                "componentType": 5125,  # UNSIGNED_INT
+                "count": len(indices),
+                "type": "SCALAR"
+            })
+
+            # Create primitive with attributes and indices
+            primitive = {
+                "attributes": {"POSITION": position_accessor_idx},
+                "indices": index_accessor_idx
+            }
+            
+            # Use the primary material from the USDMesh if available
+            if usd_mesh.has_material():
+                primary_material = usd_mesh.get_primary_material()
+                material_idx = self._process_single_material(primary_material, link)
+                if material_idx is not None:
+                    primitive["material"] = material_idx
+                    logger.debug(f"Assigned material {material_idx} to mesh {mesh_name}")
+            else:
+                logger.debug(f"Mesh {mesh_name} has no material")
+            
+            primitives.append(primitive)
         
         self.meshes_gltf.append({
-            "primitives": [primitive],
+            "primitives": primitives,
             "name": mesh_name
         })
 
-        logger.debug(f"Created glTF mesh {mesh_idx}: {mesh_name}")
+        logger.debug(f"Created glTF mesh {mesh_idx}: {mesh_name} with {len(primitives)} primitives")
         return mesh_idx
 
     def _process_link_materials(self, link: USDLink) -> None:
@@ -366,9 +421,13 @@ class USDToGLTFConverter:
         
         # Count total meshes and materials
         total_meshes = sum(len(link.meshes) for link in self.robot.links.values())
-        total_materials = sum(len([m for m in link.meshes if m.has_material()]) for link in self.robot.links.values())
+        total_materials = sum(mesh.get_material_count() for link in self.robot.links.values() for mesh in link.meshes)
+        meshes_with_multiple_materials = sum(1 for link in self.robot.links.values() for mesh in link.meshes if mesh.has_multiple_materials())
+        
         logger.info(f"Processed {len(self.meshes_gltf)} glTF meshes from {total_meshes} USD meshes")
         logger.info(f"Processed {len(self.materials_gltf)} glTF materials from {total_materials} USD materials")
+        if meshes_with_multiple_materials > 0:
+            logger.info(f"Found {meshes_with_multiple_materials} meshes with multiple materials")
         
         if not self.meshes_gltf:
             logger.warning("No meshes found to export - creating structure-only glTF.")
@@ -426,9 +485,7 @@ class USDToGLTFConverter:
     
     def _create_final_glb(self, path: str) -> None:
         """Create and write the final glTF binary (GLB) file."""
-        import struct
         gltf_path = path
-        bin_path = gltf_path.replace('.glb', '.bin')
         # Find root nodes (nodes with no parent)
         root_nodes: List[int] = []
         if self.robot.base_link and self.robot.base_link in self.link_to_node_idx:
@@ -448,20 +505,28 @@ class USDToGLTFConverter:
         # Add materials if any exist
         if self.materials_gltf:
             gltf["materials"] = self.materials_gltf
+        
+        # Optimize JSON serialization
         gltf_json = json.dumps(gltf, separators=(",", ":"))
         gltf_json_bytes = gltf_json.encode('utf-8')
+        
         # Pad JSON chunk to 4 bytes
-        while len(gltf_json_bytes) % 4 != 0:
-            gltf_json_bytes += b' '
+        json_padding = (4 - len(gltf_json_bytes) % 4) % 4
+        if json_padding:
+            gltf_json_bytes += b' ' * json_padding
+        
         # Pad BIN chunk to 4 bytes
-        bin_data = self.bin_data
-        while len(bin_data) % 4 != 0:
-            bin_data += b'\x00'
+        bin_data = bytes(self.bin_data)
+        bin_padding = (4 - len(bin_data) % 4) % 4
+        if bin_padding:
+            bin_data += b'\x00' * bin_padding
+        
         # GLB header
         magic = b'glTF'
         version = 2
         length = 12 + 8 + len(gltf_json_bytes) + 8 + len(bin_data)
-        # Write GLB
+        
+        # Write GLB in one go for better performance
         with open(gltf_path, 'wb') as f:
             # Header
             f.write(struct.pack('<4sII', magic, version, length))
@@ -471,6 +536,7 @@ class USDToGLTFConverter:
             # BIN chunk
             f.write(struct.pack('<I4s', len(bin_data), b'BIN\x00'))
             f.write(bin_data)
+        
         logger.info(f"Exported robot to {gltf_path} (GLB format)")
         logger.info(f"  - {len(self.gltf_nodes)} nodes")
         logger.info(f"  - {len(self.meshes_gltf)} meshes")
@@ -478,23 +544,90 @@ class USDToGLTFConverter:
         logger.info(f"  - {len(self.accessors)} accessors")
         logger.info(f"  - {len(self.bufferViews)} buffer views")
 
+    def _triangulate_faces_optimized(self, face_vertex_indices: List[int], face_vertex_counts: List[int]) -> List[int]:
+        """Optimized triangulation of faces using list comprehension."""
+        indices = []
+        offset = 0
+        
+        # Pre-allocate list size for better performance
+        triangle_count = sum(1 for count in face_vertex_counts if count == 3)
+        if triangle_count > 0:
+            indices = [0] * (triangle_count * 3)
+            idx_pos = 0
+            
+            for count in face_vertex_counts:
+                if count == 3:
+                    indices[idx_pos] = face_vertex_indices[offset]
+                    indices[idx_pos + 1] = face_vertex_indices[offset + 1]
+                    indices[idx_pos + 2] = face_vertex_indices[offset + 2]
+                    idx_pos += 3
+                offset += count
+        
+        return indices
+    
+    def _get_geom_subset_indices_optimized(self, geom_subset_prim: Any, face_vertex_indices: List[int], face_vertex_counts: List[int]) -> List[int]:
+        """Optimized version of GeomSubset index extraction."""
+        try:
+            geom_subset = UsdGeom.Subset(geom_subset_prim)
+            subset_indices_attr = geom_subset.GetIndicesAttr()
+            if not subset_indices_attr:
+                logger.warning(f"GeomSubset {geom_subset_prim.GetName()} has no indices attribute")
+                return []
+            
+            subset_face_indices = subset_indices_attr.Get()
+            if not subset_face_indices:
+                logger.warning(f"GeomSubset {geom_subset_prim.GetName()} has empty indices")
+                return []
+            
+            # Convert to set for O(1) lookup
+            subset_face_set = set(subset_face_indices)
+            
+            # Pre-calculate triangle count
+            triangle_count = sum(1 for face_idx, face_count in enumerate(face_vertex_counts) 
+                               if face_idx in subset_face_set and face_count == 3)
+            
+            # Pre-allocate list
+            triangle_indices = [0] * (triangle_count * 3)
+            vertex_offset = 0
+            output_idx = 0
+            
+            for face_idx, face_count in enumerate(face_vertex_counts):
+                if face_idx in subset_face_set and face_count == 3:
+                    triangle_indices[output_idx] = face_vertex_indices[vertex_offset]
+                    triangle_indices[output_idx + 1] = face_vertex_indices[vertex_offset + 1]
+                    triangle_indices[output_idx + 2] = face_vertex_indices[vertex_offset + 2]
+                    output_idx += 3
+                vertex_offset += face_count
+            
+            logger.debug(f"GeomSubset {geom_subset_prim.GetName()}: {len(subset_face_indices)} faces -> {len(triangle_indices)} triangle indices")
+            return triangle_indices
+            
+        except Exception as e:
+            logger.error(f"Error processing GeomSubset {geom_subset_prim.GetName()}: {e}")
+            return []
+
 
 if __name__ == "__main__":
     # Enable detailed debug logging to see transform extraction
     # logging.getLogger().setLevel(logging.DEBUG)
     # logger.setLevel(logging.DEBUG)
     
-    # stage: Usd.Stage = Usd.Stage.Open("Assets/Go2.usd")
-    # robot: USDRobot = USDRobot(stage, "Go2Robot")
-    # converter = USDToGLTFConverter(robot)
-    # converter.export("Output/Go2.glb")
+    stage: Usd.Stage = Usd.Stage.Open("Assets/Go2.usd")
+    robot: USDRobot = USDRobot(stage, "Go2Robot")
+    converter = USDToGLTFConverter(robot)
+    converter.export("Output/Go2.glb")
     
     # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Unitree/G1/g1.usd")
     # robot: USDRobot = USDRobot(stage, "G1")
     # converter = USDToGLTFConverter(robot)
     # converter.export("Output/G1.glb")
     
-    stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/1X/Neo/neo.usd")
-    robot: USDRobot = USDRobot(stage, "Neo")
-    converter = USDToGLTFConverter(robot)
-    converter.export("Output/Neo.glb")
+    # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
+    # robot: USDRobot = USDRobot(stage, "Franka")
+    # converter = USDToGLTFConverter(robot)
+    # converter.export("Output/Franka.glb")
+    
+    # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Festo/FestoCobot/festo_cobot.usd")
+    # robot: USDRobot = USDRobot(stage, "Festo")
+    # converter = USDToGLTFConverter(robot)
+    # converter.export("Output/Festo.glb")

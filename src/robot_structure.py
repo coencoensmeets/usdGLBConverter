@@ -3,8 +3,10 @@ import struct
 import logging
 from pxr import Usd, UsdGeom, UsdShade, Gf
 import math
+import numpy as np
 from .math_utils import quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat
-from typing import List, Tuple, Optional, Dict, Any, Union
+from typing import List, Tuple, Optional, Dict, Any, Union, Set
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,11 @@ class USDLink:
         self.meshes: List['USDMesh'] = []  # Changed from separate mesh_prims and material_prims
         self.joints: List['USDJoint'] = []
         self.parent_joint: Optional['USDJoint'] = None
+        
+        # Cache for expensive operations
+        self._all_child_links_cache: Optional[List['USDLink']] = None
+        self._all_materials_cache: Optional[List[Any]] = None
+        self._material_summary_cache: Optional[Dict[str, Any]] = None
     
     def _extract_transform(self) -> Tuple[List[float], List[float], List[float]]:
         """Extract translation, rotation, and scale from the USD prim."""
@@ -81,9 +88,12 @@ class USDLink:
         return translation, rotation, scale
 
     def add_mesh(self, mesh_prim: Any, material_prim: Any = None) -> None:
-        """Add a mesh primitive with its optional material to this link."""
+        """Add a mesh primitive with its optional material to this link.
+        The USDMesh will automatically discover all materials including GeomSubset materials."""
         usd_mesh = USDMesh(mesh_prim, material_prim)
         self.meshes.append(usd_mesh)
+        # Invalidate caches
+        self._invalidate_caches()
 
     def add_material(self, material_prim: Any) -> None:
         """Add a material primitive to this link."""
@@ -98,29 +108,45 @@ class USDLink:
         """Get all meshes that don't have materials assigned."""
         return [mesh for mesh in self.meshes if not mesh.has_material()]
     
-    def get_all_materials(self) -> List[Any]:
-        """Get all unique material prims used by this link's meshes."""
-        materials = []
-        seen_materials = set()
-        for mesh in self.meshes:
-            if mesh.material_prim and mesh.material_prim not in seen_materials:
-                materials.append(mesh.material_prim)
-                seen_materials.add(mesh.material_prim)
-        return materials
+    def get_meshes_with_multiple_materials(self) -> List['USDMesh']:
+        """Get all meshes that have multiple materials assigned."""
+        return [mesh for mesh in self.meshes if mesh.has_multiple_materials()]
+    
+    def get_total_material_count(self) -> int:
+        """Get the total count of all materials across all meshes in this link."""
+        return sum(mesh.get_material_count() for mesh in self.meshes)
+    
+    def get_material_summary(self) -> Dict[str, Any]:
+        """Get a summary of materials used by this link's meshes (cached)."""
+        if self._material_summary_cache is None:
+            summary = {
+                'total_meshes': len(self.meshes),
+                'meshes_with_materials': len(self.get_meshes_with_materials()),
+                'meshes_without_materials': len(self.get_meshes_without_materials()),
+                'meshes_with_multiple_materials': len(self.get_meshes_with_multiple_materials()),
+                'total_material_count': self.get_total_material_count(),
+                'unique_materials': len(self.get_all_materials())
+            }
+            self._material_summary_cache = summary
+        return self._material_summary_cache
 
     def add_joint(self, joint: 'USDJoint') -> None:
         """Add a child joint to this link."""
         self.joints.append(joint)
         joint.parent_link = self
+        # Invalidate caches
+        self._all_child_links_cache = None
 
     def get_all_child_links(self) -> List['USDLink']:
-        """Get all child links recursively."""
-        child_links = []
-        for joint in self.joints:
-            if joint.child_link:
-                child_links.append(joint.child_link)
-                child_links.extend(joint.child_link.get_all_child_links())
-        return child_links
+        """Get all child links recursively (cached)."""
+        if self._all_child_links_cache is None:
+            child_links = []
+            for joint in self.joints:
+                if joint.child_link:
+                    child_links.append(joint.child_link)
+                    child_links.extend(joint.child_link.get_all_child_links())
+            self._all_child_links_cache = child_links
+        return self._all_child_links_cache
 
     def get_position(self) -> List[float]:
         """Get the position of this link."""
@@ -227,6 +253,25 @@ class USDLink:
     def __repr__(self) -> str:
         return self.__str__()
 
+    def get_all_materials(self) -> List[Any]:
+        """Get all unique material prims used by this link's meshes (cached)."""
+        if self._all_materials_cache is None:
+            materials = []
+            seen_materials = set()
+            for mesh in self.meshes:
+                # Get all materials from each mesh (handles multiple materials per mesh)
+                for material in mesh.get_materials():
+                    if material not in seen_materials:
+                        materials.append(material)
+                        seen_materials.add(material)
+            self._all_materials_cache = materials
+        return self._all_materials_cache
+    
+    def _invalidate_caches(self) -> None:
+        """Invalidate all cached data when meshes are modified."""
+        self._all_materials_cache = None
+        self._material_summary_cache = None
+
 class USDJoint:
     """
     Represents a robot joint connecting two links.
@@ -316,18 +361,32 @@ class USDJoint:
     
     def get_local_positions(self) -> Tuple[Optional[List[float]], Optional[List[float]]]:
         """Get local positions of the joint attachment points on body0 and body1."""
-        local_pos0 = self.get_property('physics:localPos0')
-        local_pos1 = self.get_property('physics:localPos1')
+        pos0 = pos1 = None
         
-        pos0 = list(local_pos0) if local_pos0 and hasattr(local_pos0, '__len__') and len(local_pos0) == 3 else None
-        pos1 = list(local_pos1) if local_pos1 and hasattr(local_pos1, '__len__') and len(local_pos1) == 3 else None
+        if 'physics:localPos0' in self.properties and 'physics:localPos1' in self.properties:
+            local_pos0 = self.get_property('physics:localPos0')
+            local_pos1 = self.get_property('physics:localPos1')
+            
+            pos0 = list(local_pos0) if local_pos0 and hasattr(local_pos0, '__len__') and len(local_pos0) == 3 else None
+            pos1 = list(local_pos1) if local_pos1 and hasattr(local_pos1, '__len__') and len(local_pos1) == 3 else None
+        elif 'xformOp:translate' in self.properties:
+            # Fallback to xformOp:translate if localPos0/localPos1 are not available
+            local_pos0 = self.get_property('xformOp:translate')
         
         return pos0, pos1
     
     def get_local_rotations(self) -> Tuple[Optional[List[float]], Optional[List[float]]]:
         """Get local rotations of the joint attachment points on body0 and body1."""
-        local_rot0 = self.get_property('physics:localRot0')
-        local_rot1 = self.get_property('physics:localRot1')
+        local_rot0 = local_rot1 = None
+        if 'physics:localRot0' in self.properties and 'physics:localRot1' in self.properties:
+            print(f"[Test] Joint {self.name} has localRot0 and localRot1 properties")
+            local_rot0 = self.get_property('physics:localRot0')
+            local_rot1 = self.get_property('physics:localRot1')
+        elif 'xformOp:orient' in self.properties:
+            # Fallback to xformOp:orient if localRot0/localRot1 are not available
+            local_rot0 = self.get_property('xformOp:orient')
+            
+        print(f"[Test] Joint {self.name} local rotations: {local_rot0}, {local_rot1}")
         
         # USD rotations are quaternions in (w, x, y, z) format, convert to (x, y, z, w)
         rot0 = None
@@ -338,10 +397,14 @@ class USDJoint:
 
         if local_rot0_list and len(local_rot0_list) == 4:
             rot0 = [local_rot0_list[1], local_rot0_list[2], local_rot0_list[3], local_rot0_list[0]]  # w,x,y,z -> x,y,z,w
-        
+
         if local_rot1_list and len(local_rot1_list) == 4:
             rot1 = [local_rot1_list[1], local_rot1_list[2], local_rot1_list[3], local_rot1_list[0]]  # w,x,y,z -> x,y,z,w
-        
+
+        # If no rotations found at all, return (None, None)
+        if rot0 is None and rot1 is None:
+            return None, None
+
         return rot0, rot1
     
     def print_properties(self) -> None:
@@ -390,6 +453,12 @@ class USDRobot:
         self.links: Dict[str, USDLink] = {}
         self.joints: Dict[str, USDJoint] = {}
         self.link_prims: Dict[Any, USDLink] = {}  # Map prim to link
+        
+        # Performance optimization: caches
+        self._prim_cache: Dict[str, Any] = {}
+        self._material_cache: Dict[Any, Any] = {}
+        self._mesh_to_link_cache: Dict[str, USDLink] = {}
+        
         self._build_robot_structure()
     
     def _build_robot_structure(self) -> None:
@@ -415,8 +484,10 @@ class USDRobot:
         self._assign_meshes_to_links(root)
         total_meshes = sum(len(link.meshes) for link in self.links.values())
         total_materials = sum(len([m for m in link.meshes if m.has_material()]) for link in self.links.values())
+        total_all_materials = sum(sum(len(mesh.get_materials()) for mesh in link.meshes) for link in self.links.values())
         logger.info(f"Assigned {total_meshes} meshes to links")
         logger.info(f"Found {total_materials} meshes with materials")
+        logger.info(f"Total material assignments: {total_all_materials}")
         
         # Debug: Show mesh and material assignment details
         if logger.isEnabledFor(logging.DEBUG):
@@ -425,8 +496,13 @@ class USDRobot:
                     mesh_info = []
                     for mesh in link.meshes:
                         mesh_str = f"{mesh.name}"
-                        if mesh.has_material():
-                            mesh_str += f" (mat: {mesh.get_material_name()})"
+                        if mesh.has_multiple_materials():
+                            material_names = mesh.get_all_material_names()
+                            mesh_str += f" ({len(material_names)} materials: {', '.join(material_names)})"
+                        elif mesh.has_material():
+                            mesh_str += f" (material: {mesh.get_material_name()})"
+                        else:
+                            mesh_str += " (no materials)"
                         mesh_info.append(mesh_str)
                     logger.debug(f"  Link '{link_name}' has meshes: {mesh_info}")
         
@@ -448,24 +524,35 @@ class USDRobot:
             self.print_joint_properties()
     
     def _collect_joints(self, prim: Any, joint_data: List) -> None:
-        """Recursively collect joint prims and their relationships."""
-        if 'joint' in prim.GetName().lower():
-            body0 = body1 = None
-            for rel in prim.GetRelationships():
-                if rel.GetName() == "physics:body0":
-                    targets = rel.GetTargets()
-                    if targets:
-                        body0 = self.stage.GetPrimAtPath(str(targets[0]))
-                elif rel.GetName() == "physics:body1":
-                    targets = rel.GetTargets()
-                    if targets:
-                        body1 = self.stage.GetPrimAtPath(str(targets[0]))
-            
-            if body0 and body1:
-                joint_data.append((prim, body0, body1))
+        """Recursively collect joint prims and their relationships - optimized version."""
+        # Use a stack-based approach instead of recursion for better performance
+        stack = [prim]
         
-        for child in prim.GetChildren():
-            self._collect_joints(child, joint_data)
+        while stack:
+            current_prim = stack.pop()
+            
+            if 'joint' in current_prim.GetTypeName().lower():
+                body0 = body1 = None
+                # Use list comprehension for faster relationship processing
+                relationships = [(rel.GetName(), rel.GetTargets()) for rel in current_prim.GetRelationships()]
+                
+                for rel_name, targets in relationships:
+                    if rel_name == "physics:body0" and targets:
+                        body0 = self._get_prim_cached(str(targets[0]))
+                    elif rel_name == "physics:body1" and targets:
+                        body1 = self._get_prim_cached(str(targets[0]))
+                
+                if body0 and body1:
+                    joint_data.append((current_prim, body0, body1))
+            
+            # Add children to stack
+            stack.extend(current_prim.GetChildren())
+    
+    def _get_prim_cached(self, path: str) -> Any:
+        """Get prim with caching for better performance."""
+        if path not in self._prim_cache:
+            self._prim_cache[path] = self.stage.GetPrimAtPath(path)
+        return self._prim_cache[path]
     
     def _create_links_from_joints(self, joint_data: List) -> None:
         """Create USDLink objects from joint body relationships."""
@@ -565,68 +652,115 @@ class USDRobot:
                 logger.debug(f"Connected joint {joint.name}: {parent_link.name} -> {child_link.name}")
     
     def _assign_meshes_to_links(self, prim: Any) -> None:
-        """Find and assign mesh prims with their materials to their corresponding links."""
-        if prim.GetTypeName() == "Mesh":
-            # Find which link this mesh belongs to based on hierarchy or naming
-            mesh_name = prim.GetName()
-            mesh_path = str(prim.GetPath())
+        """Find and assign mesh prims with their materials to their corresponding links - optimized version."""
+        # Use breadth-first search for better cache locality
+        from collections import deque
+        queue = deque([prim])
+        meshes_found = []
+        
+        # First pass: collect all meshes
+        while queue:
+            current_prim = queue.popleft()
             
-            logger.debug(f"Found mesh: {mesh_name} at path: {mesh_path}")
+            if current_prim.GetTypeName() == "Mesh":
+                meshes_found.append(current_prim)
             
-            # Find the material for this mesh
-            material_prim = self._find_material_for_mesh_prim(prim)
-            if material_prim:
-                logger.debug(f"  -> Material: {material_prim.GetName()}")
+            queue.extend(current_prim.GetChildren())
+        
+        # Second pass: process meshes in batch
+        for mesh_prim in meshes_found:
+            self._process_single_mesh_assignment(mesh_prim)
+    
+    def _process_single_mesh_assignment(self, mesh_prim: Any) -> None:
+        """Process a single mesh assignment - optimized version."""
+        mesh_name = mesh_prim.GetName()
+        mesh_path = str(mesh_prim.GetPath())
+        
+        logger.debug(f"Found mesh: {mesh_name} at path: {mesh_path}")
+        
+        # Check cache first
+        if mesh_path in self._mesh_to_link_cache:
+            link = self._mesh_to_link_cache[mesh_path]
+            material_prim = self._find_material_for_mesh_prim_cached(mesh_prim)
+            link.add_mesh(mesh_prim, material_prim)
+            return
+        
+        # Find the material for this mesh (cached)
+        material_prim = self._find_material_for_mesh_prim_cached(mesh_prim)
+        if material_prim:
+            logger.debug(f"  -> Material: {material_prim.GetName()}")
+        else:
+            logger.debug(f"  -> No material found")
+        
+        # Optimized link matching using pre-computed scores
+        best_match = self._find_best_link_match(mesh_name, mesh_path)
+        
+        if best_match:
+            logger.debug(f"  -> Assigned mesh '{mesh_name}' to link '{best_match.name}'")
+            best_match.add_mesh(mesh_prim, material_prim)
+            # Cache the result
+            self._mesh_to_link_cache[mesh_path] = best_match
+        else:
+            logger.warning(f"  -> No matching link found for mesh: {mesh_name}")
+    
+    def _find_best_link_match(self, mesh_name: str, mesh_path: str) -> Optional[USDLink]:
+        """Find the best matching link for a mesh using optimized scoring."""
+        best_match = None
+        best_score = 0
+        
+        mesh_name_clean = mesh_name.lower().replace('_', '').replace('-', '')
+        mesh_name_words = set(mesh_name_clean.split())
+        
+        for link in self.links.values():
+            score = 0
+            
+            # Path-based matching (highest priority)
+            link_path = str(link.prim.GetPath())
+            if mesh_path.startswith(link_path):
+                score = 100 + len(link_path)  # Prefer deeper matches
             else:
-                logger.debug(f"  -> No material found")
-            
-            # Try to find a matching link by name similarity
-            best_match = None
-            best_score = 0
-            
-            for link in self.links.values():
-                # Check if mesh name contains link name or vice versa
+                # Name-based matching
                 link_name_clean = link.name.lower().replace('_', '').replace('-', '')
-                mesh_name_clean = mesh_name.lower().replace('_', '').replace('-', '')
+                link_name_words = set(link_name_clean.split())
                 
-                # Score based on string similarity
+                # Word overlap scoring
+                common_words = mesh_name_words & link_name_words
+                if common_words:
+                    score = len(common_words) * 10
+                
+                # Substring matching
                 if link_name_clean in mesh_name_clean or mesh_name_clean in link_name_clean:
-                    score = len(set(link_name_clean) & set(mesh_name_clean))
-                    if score > best_score:
-                        best_score = score
-                        best_match = link
-                
-                # Also try path-based matching - check if mesh is under link's hierarchy
-                link_path = str(link.prim.GetPath())
-                if mesh_path.startswith(link_path):
-                    # Mesh is under this link's hierarchy - high score
-                    score = 100 + len(link_path)  # Prefer deeper matches
-                    if score > best_score:
-                        best_score = score
-                        best_match = link
+                    score += len(set(link_name_clean) & set(mesh_name_clean))
             
-            if best_match:
-                logger.debug(f"  -> Assigned mesh '{mesh_name}' to link '{best_match.name}' (score: {best_score})")
-                best_match.add_mesh(prim, material_prim)
-            else:
-                logger.warning(f"  -> No matching link found for mesh: {mesh_name}")
-                # Don't assign to any link - some meshes might not belong to robot links
+            if score > best_score:
+                best_score = score
+                best_match = link
+        
+        return best_match
     
-        for child in prim.GetChildren():
-            self._assign_meshes_to_links(child)
+    def _find_material_for_mesh_prim_cached(self, mesh_prim: Any) -> Optional[Any]:
+        """Find the primary material bound to a specific mesh prim - cached version."""
+        if mesh_prim in self._material_cache:
+            return self._material_cache[mesh_prim]
+        
+        material_prim = self._find_material_for_mesh_prim_internal(mesh_prim)
+        self._material_cache[mesh_prim] = material_prim
+        return material_prim
     
-    def _find_material_for_mesh_prim(self, mesh_prim: Any) -> Optional[Any]:
-        """Find the material bound to a specific mesh prim."""
+    def _find_material_for_mesh_prim_internal(self, mesh_prim: Any) -> Optional[Any]:
+        """Internal method to find material for mesh prim."""
         # Check if the mesh has a direct material binding
         material_api = UsdShade.MaterialBindingAPI(mesh_prim)
         if material_api:
             direct_binding = material_api.GetDirectBinding()
             if direct_binding and direct_binding.GetMaterial():
+                logger.debug(f"  -> Found direct material binding: {direct_binding.GetMaterial().GetPrim().GetName()}")
                 return direct_binding.GetMaterial().GetPrim()
             
             # Check for inherited material binding
             inherited_binding = material_api.ComputeBoundMaterial()
             if inherited_binding[0] and inherited_binding[0].GetMaterial():
+                logger.debug(f"  -> Found inherited material binding: {inherited_binding[0].GetMaterial().GetPrim().GetName()}")
                 return inherited_binding[0].GetMaterial().GetPrim()
         
         # Method 2: Check for material:binding relationships (more direct approach)
@@ -634,12 +768,12 @@ class USDRobot:
             if rel.GetName() == "material:binding":
                 targets = rel.GetTargets()
                 for target in targets:
-                    target_prim = mesh_prim.GetStage().GetPrimAtPath(target)
+                    target_prim = self._get_prim_cached(str(target))
                     if target_prim and target_prim.GetTypeName() == "Material":
                         logger.debug(f"  -> Found material via relationship: {target_prim.GetName()}")
                         return target_prim
         
-        # Check parent prims for material bindings (walk up the hierarchy)
+        # Check parent_prim for material bindings (walk up the hierarchy)
         parent_prim = mesh_prim.GetParent()
         while parent_prim:
             # Check parent with USD Shade API
@@ -655,7 +789,7 @@ class USDRobot:
                 if rel.GetName() == "material:binding":
                     targets = rel.GetTargets()
                     for target in targets:
-                        target_prim = parent_prim.GetStage().GetPrimAtPath(target)
+                        target_prim = self._get_prim_cached(str(target))
                         if target_prim and target_prim.GetTypeName() == "Material":
                             logger.debug(f"  -> Found material via parent relationship: {target_prim.GetName()}")
                             return target_prim
@@ -705,17 +839,26 @@ class USDRobot:
         connector = "└── " if is_last else "├── "
         mesh_count = len(link.meshes)
         material_count = len([m for m in link.meshes if m.has_material()])
+        total_material_count = sum(m.get_material_count() for m in link.meshes)
         
         # Show mesh info
         if mesh_count > 0:
-            mesh_names = [mesh.name for mesh in link.meshes]
+            mesh_names = []
+            for mesh in link.meshes:
+                if mesh.has_multiple_materials():
+                    mesh_names.append(f"{mesh.name}({mesh.get_material_count()}mats)")
+                else:
+                    mesh_names.append(mesh.name)
             mesh_info = f" [{mesh_count} meshes: {', '.join(mesh_names)}]"
         else:
             mesh_info = " [no meshes]"
         
         # Show material info
-        if material_count > 0:
-            material_info = f" [{material_count} with materials]"
+        if total_material_count > 0:
+            if total_material_count > material_count:
+                material_info = f" [{material_count} meshes with {total_material_count} materials total]"
+            else:
+                material_info = f" [{material_count} with materials]"
         else:
             material_info = " [no materials]"
         
@@ -733,54 +876,64 @@ class USDRobot:
                 self.print_structure(joint.child_link, child_prefix, True)
     
     def validate_joint_tree(self) -> bool:
-        """Validate the joint tree structure for consistency."""
+        """Validate the joint tree structure for consistency - optimized version."""
         logger.info("Validating joint tree structure...")
         
         issues = []
         
-        # Check 1: Every joint should have both parent and child links
+        # Batch validation for better performance
+        
+        # Check 1 & 2: Joint and link validation in one pass
         for joint in self.joints.values():
             if not joint.parent_link:
                 issues.append(f"Joint '{joint.name}' has no parent link")
             if not joint.child_link:
                 issues.append(f"Joint '{joint.name}' has no child link")
         
-        # Check 2: Every link (except base) should have a parent joint
         for link in self.links.values():
             if link != self.base_link and not link.parent_joint:
                 issues.append(f"Link '{link.name}' has no parent joint (and is not base link)")
         
-        # Check 3: Base link should have no parent joint
+        # Check 3: Base link validation
         if self.base_link and self.base_link.parent_joint:
             issues.append(f"Base link '{self.base_link.name}' has a parent joint")
         
-        # Check 4: No circular references
-        visited = set()
-        def check_cycles(link, path):
-            if link in path:
-                issues.append(f"Circular reference detected: {' -> '.join([l.name for l in path] + [link.name])}")
-                return
-            if link in visited:
-                return
-            visited.add(link)
-            new_path = path + [link]
-            for joint in link.joints:
-                if joint.child_link:
-                    check_cycles(joint.child_link, new_path)
-        
+        # Check 4: Circular references - optimized with iterative approach
         if self.base_link:
-            check_cycles(self.base_link, [])
+            visited = set()
+            stack = [(self.base_link, [self.base_link])]
+            
+            while stack:
+                current_link, path = stack.pop()
+                
+                if current_link in visited:
+                    continue
+                    
+                visited.add(current_link)
+                
+                for joint in current_link.joints:
+                    if joint.child_link:
+                        if joint.child_link in path:
+                            issues.append(f"Circular reference detected: {' -> '.join([l.name for l in path] + [joint.child_link.name])}")
+                        else:
+                            stack.append((joint.child_link, path + [joint.child_link]))
         
-        # Check 5: All links should be reachable from base
+        # Check 5: Reachability - optimized with set operations
         if self.base_link:
             reachable = set()
-            def mark_reachable(link):
-                reachable.add(link)
-                for joint in link.joints:
-                    if joint.child_link and joint.child_link not in reachable:
-                        mark_reachable(joint.child_link)
+            stack = [self.base_link]
             
-            mark_reachable(self.base_link)
+            while stack:
+                current_link = stack.pop()
+                if current_link in reachable:
+                    continue
+                    
+                reachable.add(current_link)
+                
+                for joint in current_link.joints:
+                    if joint.child_link and joint.child_link not in reachable:
+                        stack.append(joint.child_link)
+            
             unreachable = set(self.links.values()) - reachable
             for link in unreachable:
                 issues.append(f"Link '{link.name}' is not reachable from base link")
@@ -796,7 +949,7 @@ class USDRobot:
             return True
     
     def get_tree_statistics(self) -> Dict[str, Any]:
-        """Get statistics about the joint tree structure."""
+        """Get statistics about the joint tree structure - optimized version."""
         stats = {
             'total_links': len(self.links),
             'total_joints': len(self.joints),
@@ -807,11 +960,16 @@ class USDRobot:
             'links_without_meshes': 0,
             'links_with_materials': 0,
             'links_without_materials': 0,
-            'joint_types': {}
+            'meshes_with_multiple_materials': 0,
+            'total_material_assignments': 0,
+            'unique_materials_count': 0,
+            'joint_types': defaultdict(int)
         }
         
-        # Count links with/without meshes and materials
+        # Batch process links for better performance
+        all_materials = set()
         for link in self.links.values():
+            # Count links with/without meshes
             if link.meshes:
                 stats['links_with_meshes'] += 1
             else:
@@ -823,25 +981,47 @@ class USDRobot:
                 stats['links_with_materials'] += 1
             else:
                 stats['links_without_materials'] += 1
+            
+            # Count meshes with multiple materials
+            stats['meshes_with_multiple_materials'] += sum(1 for mesh in link.meshes if mesh.has_multiple_materials())
+            
+            # Count total material assignments
+            stats['total_material_assignments'] += sum(mesh.get_material_count() for mesh in link.meshes)
+            
+            # Collect unique materials
+            all_materials.update(link.get_all_materials())
         
-        # Count joint types
+        stats['unique_materials_count'] = len(all_materials)
+        
+        # Count joint types using defaultdict for better performance
         for joint in self.joints.values():
-            joint_type = joint.joint_type
-            stats['joint_types'][joint_type] = stats['joint_types'].get(joint_type, 0) + 1
+            stats['joint_types'][joint.joint_type] += 1
+        
+        # Convert defaultdict back to regular dict
+        stats['joint_types'] = dict(stats['joint_types'])
         
         # Calculate tree depth and find leaf links
-        def calculate_depth(link, depth=0):
-            stats['max_depth'] = max(stats['max_depth'], depth)
-            if not link.joints:  # Leaf link
-                stats['leaf_links'].append(link.name)
-            for joint in link.joints:
-                if joint.child_link:
-                    calculate_depth(joint.child_link, depth + 1)
-        
         if self.base_link:
-            calculate_depth(self.base_link)
+            self._calculate_depth_optimized(self.base_link, 0, stats)
         
         return stats
+    
+    def _calculate_depth_optimized(self, link: USDLink, depth: int, stats: Dict[str, Any]) -> None:
+        """Calculate tree depth and leaf links - optimized iterative version."""
+        # Use stack-based approach to avoid recursion overhead
+        stack = [(link, depth)]
+        
+        while stack:
+            current_link, current_depth = stack.pop()
+            stats['max_depth'] = max(stats['max_depth'], current_depth)
+            
+            if not current_link.joints:  # Leaf link
+                stats['leaf_links'].append(current_link.name)
+            else:
+                # Add children to stack
+                for joint in current_link.joints:
+                    if joint.child_link:
+                        stack.append((joint.child_link, current_depth + 1))
     
     def print_statistics(self) -> None:
         """Print detailed statistics about the robot structure."""
@@ -857,6 +1037,9 @@ class USDRobot:
         logger.info(f"Links without Meshes: {stats['links_without_meshes']}")
         logger.info(f"Links with Materials: {stats['links_with_materials']}")
         logger.info(f"Links without Materials: {stats['links_without_materials']}")
+        logger.info(f"Meshes with Multiple Materials: {stats['meshes_with_multiple_materials']}")
+        logger.info(f"Total Material Assignments: {stats['total_material_assignments']}")
+        logger.info(f"Unique Materials: {stats['unique_materials_count']}")
         logger.info(f"Joint Types: {stats['joint_types']}")
 
     def print_joint_properties(self) -> None:
@@ -894,6 +1077,24 @@ class USDRobot:
             
             logger.info("")  # Empty line for readability
     
+    def clear_caches(self) -> None:
+        """Clear all performance caches - useful when robot structure changes."""
+        self._prim_cache.clear()
+        self._material_cache.clear()
+        self._mesh_to_link_cache.clear()
+        
+        # Clear link caches
+        for link in self.links.values():
+            link._invalidate_caches()
+            link._all_child_links_cache = None
+        
+        # Clear mesh caches
+        for link in self.links.values():
+            for mesh in link.meshes:
+                mesh._material_names_cache = None
+                mesh._has_material_cache = None
+                mesh._has_multiple_materials_cache = None
+    
     def __str__(self) -> str:
         return f"USDRobot({self.name}, {len(self.links)} links, {len(self.joints)} joints)"
     
@@ -902,28 +1103,115 @@ class USDRobot:
 
 class USDMesh:
     """
-    Represents a mesh with its associated material.
+    Represents a mesh with its associated materials.
+    Can handle both single material assignment and multiple materials via GeomSubsets.
     """
     def __init__(self, mesh_prim: Any, material_prim: Any = None) -> None:
         self.mesh_prim: Any = mesh_prim
-        self.material_prim: Optional[Any] = material_prim
         self.name: str = mesh_prim.GetName()
         self.path: str = str(mesh_prim.GetPath())
         
-        logger.debug(f"Creating USDMesh: {self.name} at {self.path}")
+        # Handle both single material and multiple materials
+        self.material_prim: Optional[Any] = material_prim  # For backward compatibility
+        self.materials: List[Any] = []  # List of all materials
+        self.geom_subsets: List[Dict[str, Any]] = []  # List of GeomSubset info with materials
+        
+        # Performance optimization: pre-compute commonly used values
+        self._material_names_cache: Optional[List[str]] = None
+        self._has_material_cache: Optional[bool] = None
+        self._has_multiple_materials_cache: Optional[bool] = None
+        
+        # Initialize materials
         if material_prim:
-            logger.debug(f"  -> Material: {material_prim.GetName()}")
+            self.materials.append(material_prim)
+        
+        # Find all GeomSubset materials
+        self._find_geom_subset_materials_optimized()
+        
+        logger.debug(f"Creating USDMesh: {self.name} at {self.path}")
+        if self.materials:
+            material_names = self.get_all_material_names()
+            logger.debug(f"  -> Materials: {material_names}")
+    
+    def _find_geom_subset_materials_optimized(self) -> None:
+        """Find all GeomSubset children with material bindings - optimized version."""
+        # Batch process children for better performance
+        geom_subset_children = [child for child in self.mesh_prim.GetChildren() 
+                               if child.GetTypeName() == "GeomSubset"]
+        
+        for child in geom_subset_children:
+            # Check if this GeomSubset has a material binding
+            material_binding_api = UsdShade.MaterialBindingAPI(child)
+            if material_binding_api:
+                direct_binding = material_binding_api.GetDirectBinding()
+                if direct_binding and direct_binding.GetMaterial():
+                    material = direct_binding.GetMaterial().GetPrim()
+                    
+                    # Store GeomSubset info
+                    subset_info = {
+                        'geom_subset': child,
+                        'material': material,
+                        'name': child.GetName()
+                    }
+                    self.geom_subsets.append(subset_info)
+                    
+                    # Add to materials list if not already present
+                    if material not in self.materials:
+                        self.materials.append(material)
+                    
+                    logger.debug(f"  -> Found GeomSubset material: {child.GetName()} -> {material.GetName()}")
     
     def has_material(self) -> bool:
-        """Check if this mesh has a material assigned."""
-        return self.material_prim is not None
+        """Check if this mesh has any materials assigned (cached)."""
+        if self._has_material_cache is None:
+            self._has_material_cache = len(self.materials) > 0
+        return self._has_material_cache
+    
+    def has_multiple_materials(self) -> bool:
+        """Check if this mesh has multiple materials (cached)."""
+        if self._has_multiple_materials_cache is None:
+            self._has_multiple_materials_cache = len(self.materials) > 1
+        return self._has_multiple_materials_cache
+    
+    def get_all_material_names(self) -> List[str]:
+        """Get the names of all assigned materials (cached)."""
+        if self._material_names_cache is None:
+            self._material_names_cache = [mat.GetName() for mat in self.materials]
+        return self._material_names_cache
+    
+    def get_materials(self) -> List[Any]:
+        """Get all material prims."""
+        return self.materials.copy()
+    
+    def get_geom_subsets_with_materials(self) -> List[Dict[str, Any]]:
+        """Get all GeomSubsets with their associated materials."""
+        return self.geom_subsets.copy()
+    
+    def get_primary_material(self) -> Optional[Any]:
+        """Get the primary material (first one or the main material binding)."""
+        if self.material_prim:
+            return self.material_prim
+        elif self.materials:
+            return self.materials[0]
+        return None
+    
+    def get_material_count(self) -> int:
+        """Get the number of materials assigned to this mesh."""
+        return len(self.materials)
     
     def get_material_name(self) -> Optional[str]:
-        """Get the name of the assigned material."""
-        return self.material_prim.GetName() if self.material_prim else None
+        """Get the name of the first assigned material (for backward compatibility)."""
+        return self.materials[0].GetName() if self.materials else None
     
     def __str__(self) -> str:
-        material_info = f" (material: {self.get_material_name()})" if self.has_material() else " (no material)"
+        if self.has_multiple_materials():
+            material_names = self.get_all_material_names()
+            material_info = f" ({len(material_names)} materials: {', '.join(material_names)})"
+        elif self.has_material():
+            material_info = f" (material: {self.get_material_name()})"
+        else:
+            material_info = " (no materials)"
+        
         return f"USDMesh({self.name}{material_info})"
     
     def __repr__(self) -> str:
