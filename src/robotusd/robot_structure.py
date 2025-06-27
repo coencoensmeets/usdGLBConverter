@@ -266,7 +266,7 @@ class USDJoint:
     Represents a robot joint connecting two links.
     """
     def __init__(self, joint_prim: Any, parent_link: USDLink = None, child_link: USDLink = None) -> None:
-        self.joint_prim: Any = joint_prim
+        self.prim: Any = joint_prim
         self.name: str = joint_prim.GetName()
         self.parent_link: Optional[USDLink] = parent_link
         self.child_link: Optional[USDLink] = child_link
@@ -276,13 +276,13 @@ class USDJoint:
     def _determine_joint_type(self) -> str:
         """Determine the type of joint from the prim."""
         # Try to get joint type from attributes or name
-        if hasattr(self.joint_prim, 'GetAttribute'):
-            joint_type_attr = self.joint_prim.GetAttribute('physics:type')
+        if hasattr(self.prim, 'GetAttribute'):
+            joint_type_attr = self.prim.GetAttribute('physics:type')
             if joint_type_attr and joint_type_attr.IsValid():
                 return joint_type_attr.Get()
         
         # Fallback to name analysis
-        name_lower = self.name.lower()
+        name_lower = self.prim.GetTypeName().lower()
         if 'revolute' in name_lower or 'hinge' in name_lower:
             return 'revolute'
         elif 'prismatic' in name_lower or 'slider' in name_lower:
@@ -295,21 +295,21 @@ class USDJoint:
     def get_connected_body_prims(self) -> Tuple[Optional[Any], Optional[Any]]:
         """Get the two body prims connected by this joint from the joint's physics relationships."""
         body0_prim = body1_prim = None
-        for rel in self.joint_prim.GetRelationships():
+        for rel in self.prim.GetRelationships():
             if rel.GetName() == "physics:body0":
                 targets = rel.GetTargets()
                 if targets:
-                    body0_prim = self.joint_prim.GetStage().GetPrimAtPath(str(targets[0]))
+                    body0_prim = self.prim.GetStage().GetPrimAtPath(str(targets[0]))
             elif rel.GetName() == "physics:body1":
                 targets = rel.GetTargets()
                 if targets:
-                    body1_prim = self.joint_prim.GetStage().GetPrimAtPath(str(targets[0]))
+                    body1_prim = self.prim.GetStage().GetPrimAtPath(str(targets[0]))
         return body0_prim, body1_prim
     
     def _extract_joint_properties(self) -> Dict[str, Any]:
         """Extract all joint properties from the joint prim."""
         properties = {}
-        for prop in self.joint_prim.GetProperties():
+        for prop in self.prim.GetProperties():
             prop_name = prop.GetName()
             try:
                 prop_value = prop.Get()
@@ -811,13 +811,47 @@ class USDRobot:
         if self.links:
             self.base_link = list(self.links.values())[0]
     
-    def get_all_links(self) -> List[USDLink]:
+    def get_all_links(self, sorted=True) -> List[USDLink]:
         """Get all links in the robot."""
+        if sorted:
+            return [link for link in self]
         return list(self.links.values())
     
     def get_all_joints(self) -> List[USDJoint]:
         """Get all joints in the robot."""
         return list(self.joints.values())
+    
+    def get_link_tree(self, link: USDLink = None) -> Dict[str, Any]:
+        """Get the hierarchical tree structure of links starting from a given link."""
+        if link is None:
+            link = self.base_link
+        
+        if not link:
+            return {}
+        
+        tree = {
+            'name': link.name,
+            'type': 'link',
+            'joints': [],
+            'children': []
+        }
+        
+        # Add joints connected to this link
+        for joint in link.joints:
+            joint_info = {
+                'name': joint.name,
+                'type': joint.joint_type,
+                'child_link': joint.child_link.name if joint.child_link else None
+            }
+            tree['joints'].append(joint_info)
+        
+        # Recursively add child links
+        for joint in link.joints:
+            if joint.child_link:
+                child_tree = self.get_link_tree(joint.child_link)
+                tree['children'].append(child_tree)
+        
+        return tree
     
     def print_structure(self, link: USDLink = None, prefix: str = "", is_last: bool = True) -> None:
         """Print the robot structure as a tree."""
@@ -1095,6 +1129,31 @@ class USDRobot:
     
     def __repr__(self) -> str:
         return self.__str__()
+    
+    def __len__(self) -> int:
+        """Return the number of links in the robot."""
+        return len(self.links)
+    
+    def __iter__(self):
+        """Iterate over all links in the robot in tree hierarchy order (pre-order traversal)."""
+        if not self.base_link:
+            return iter([])
+        stack = [self.base_link]
+        visited = set()
+        while stack:
+            link = stack.pop()
+            if link in visited:
+                continue
+            visited.add(link)
+            yield link
+            # Add children in reverse order for left-to-right traversal
+            for joint in reversed(link.joints):
+                if joint.child_link and joint.child_link not in visited:
+                    stack.append(joint.child_link)
+    
+    def __getitem__(self, key: str) -> USDLink:
+        """Get a link by its name."""
+        return self.links[key]
 
 class USDMesh:
     """
