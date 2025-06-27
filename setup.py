@@ -50,25 +50,9 @@ install_requires = [
 
 # Optional requirements for different use cases
 extras_require = {
-    'dev': [
-        'pytest>=6.0',
-        'pytest-cov>=2.0',
-        'black>=21.0',
-        'flake8>=3.8',
-        'mypy>=0.910',
-    ],
-    'docs': [
-        'sphinx>=4.0',
-        'sphinx-rtd-theme>=0.5',
-        'myst-parser>=0.15',
-    ],
     'performance': [
-        'numba>=0.53',  # For JIT compilation of math operations
+        # Reserved for future performance optimizations
     ],
-    'visualization': [
-        'matplotlib>=3.3',
-        'plotly>=5.0',
-    ]
 }
 
 # Add development requirements to test
@@ -80,8 +64,7 @@ extras_require['all'] = list(set(sum(extras_require.values(), [])))
 setup(
     name='robotusd',
     version=get_version(),
-    author='Vectioneer',
-    author_email='support@vectioneer.com',
+    author='Coen Smeets',
     description='USD to glTF Converter for Robotics Applications',
     long_description=read_readme(),
     long_description_content_type='text/markdown',
