@@ -1,23 +1,12 @@
 import json
 import struct
 import logging
-from pxr import Usd, UsdGeom, UsdShade, Gf
-import math
+from pxr import UsdGeom, UsdShade, Gf
 import numpy as np
-from src.math_utils import quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat
-from src.robot_structure import USDRobot, USDLink, USDJoint, USDMesh
-from typing import List, Tuple, Optional, Dict, Any, Union
+from .robot_structure import USDRobot, USDLink, USDMesh
+from typing import List, Tuple, Optional, Dict, Any
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
 logger = logging.getLogger(__name__)
-
-# Set logger to INFO level (no DEBUG messages)
-logger.setLevel(logging.INFO)
 
 class USDToGLTFConverter:
     """
@@ -605,29 +594,3 @@ class USDToGLTFConverter:
         except Exception as e:
             logger.error(f"Error processing GeomSubset {geom_subset_prim.GetName()}: {e}")
             return []
-
-
-if __name__ == "__main__":
-    # Enable detailed debug logging to see transform extraction
-    # logging.getLogger().setLevel(logging.DEBUG)
-    # logger.setLevel(logging.DEBUG)
-    
-    stage: Usd.Stage = Usd.Stage.Open("Assets/Go2.usd")
-    robot: USDRobot = USDRobot(stage, "Go2Robot")
-    converter = USDToGLTFConverter(robot)
-    converter.export("Output/Go2.glb")
-    
-    # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Unitree/G1/g1.usd")
-    # robot: USDRobot = USDRobot(stage, "G1")
-    # converter = USDToGLTFConverter(robot)
-    # converter.export("Output/G1.glb")
-    
-    # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
-    # robot: USDRobot = USDRobot(stage, "Franka")
-    # converter = USDToGLTFConverter(robot)
-    # converter.export("Output/Franka.glb")
-    
-    # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Festo/FestoCobot/festo_cobot.usd")
-    # robot: USDRobot = USDRobot(stage, "Festo")
-    # converter = USDToGLTFConverter(robot)
-    # converter.export("Output/Festo.glb")

@@ -33,3 +33,25 @@ def get_all_joints(prim: Usd.Prim) -> list:
             joints.append(child)
         joints.extend(get_all_joints(child))
     return joints
+
+def print_data_prim(prim_name:str):
+    """
+    Print the data prim for a given prim name.
+    
+    Args:
+        prim_name (str): The name of the prim to find.
+    """
+    stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
+    if not stage:
+        print(f"Could not open USD file.")
+        return
+    
+    prim = get_prim_from_name(stage, prim_name)
+    if prim:
+        print(f"Data Prim for {prim_name}: {prim.GetPath()}")
+        print(f"Type: {prim.GetTypeName()}")
+        print(f"Properties:")
+        for prop in prim.GetProperties():
+            print(f"  - {prop.GetName()}: {prop.Get()}") if hasattr(prop, "Get") else print(f"  - {prop.GetName()}: No value")
+    else:
+        print(f"Prim with name {prim_name} not found.")

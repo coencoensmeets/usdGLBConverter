@@ -141,6 +141,7 @@ cython_debug/
 # Ignore Assets Output folder
 Assets/*
 Output/*
-Tests/
+Tests/*
+!Tests/print_hierarchy.py
 
 Test.py
