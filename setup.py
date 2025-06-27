@@ -55,9 +55,6 @@ extras_require = {
     ],
 }
 
-# Add development requirements to test
-extras_require['test'] = extras_require['dev']
-
 # All optional dependencies
 extras_require['all'] = list(set(sum(extras_require.values(), [])))
 
@@ -130,10 +127,6 @@ setup(
     
     # Custom commands
     cmdclass={},
-    
-    # Test configuration
-    test_suite='tests',
-    tests_require=extras_require['test'],
 )
 
 # Only show message during actual installation, not during build
