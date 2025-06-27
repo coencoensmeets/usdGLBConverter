@@ -4,7 +4,7 @@ import logging
 from pxr import Usd, UsdGeom, UsdShade, Gf
 import math
 import numpy as np
-from .math_utils import quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat
+from .math_utils import quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat, rotate_vector
 from typing import List, Tuple, Optional, Dict, Any, Union, Set
 from collections import defaultdict
 
@@ -159,10 +159,6 @@ class USDLink:
         and the inverse of localPos1/localRot1 (in child).
         The output rotation is the composed relative rotation between parent and child at the joint,
         further composed with the link's own rotation.
-        
-        Handles fallback cases:
-        - If only xformOp:orient is available, uses it as the joint rotation directly
-        - If neither localRot0 nor localRot1 are available, uses identity transforms
         """
         if not self.parent_joint or not self.parent_joint.parent_link:
             logger.debug(f"Link {self.name} is root - using world transform")
@@ -178,73 +174,24 @@ class USDLink:
             local_pos0 = [0.0, 0.0, 0.0]
         if local_pos1 is None:
             local_pos1 = [0.0, 0.0, 0.0]
+        if local_rot0 is None:
+            local_rot0 = [0.0, 0.0, 0.0, 1.0]
+        if local_rot1 is None:
+            local_rot1 = [0.0, 0.0, 0.0, 1.0]
 
-        # Handle rotation fallback cases more robustly
-        identity_quat = [0.0, 0.0, 0.0, 1.0]
-        
-        # Check if we have proper joint properties or are in fallback mode
-        has_joint_properties = ('physics:localRot0' in joint.properties and 
-                               'physics:localRot1' in joint.properties)
-        has_orient_fallback = ('xformOp:orient' in joint.properties and 
-                              not has_joint_properties)
-        
-        if has_joint_properties:
-            # Standard case: use localRot0 and localRot1 as intended
-            if local_rot0 is None:
-                local_rot0 = identity_quat.copy()
-            if local_rot1 is None:
-                local_rot1 = identity_quat.copy()
-            
-            # Compute inverse of local_rot1
-            inv_local_rot1 = quaternion_inverse(local_rot1)
-            # Compose relative rotation between parent and child at the joint
-            relative_rotation = quaternion_multiply(local_rot0, inv_local_rot1)
-            
-        elif has_orient_fallback:
-            # Fallback case: only xformOp:orient available
-            # Use it as the direct joint rotation, no need for complex composition
-            if local_rot0 is not None:
-                relative_rotation = local_rot0.copy()
-                logger.debug(f"  Using xformOp:orient as direct joint rotation: {relative_rotation}")
-            else:
-                relative_rotation = identity_quat.copy()
-                logger.debug(f"  No joint rotation available, using identity")
-                
-        else:
-            # No rotation information available
-            relative_rotation = identity_quat.copy()
-            logger.debug(f"  No joint rotation properties found, using identity")
-
+        # Compute inverse of local_rot1
+        inv_local_rot1 = quaternion_inverse(local_rot1)
+        # Compose relative rotation between parent and child at the joint
+        relative_rotation = quaternion_multiply(local_rot0, inv_local_rot1)
         # Compose with the link's own rotation
         final_rotation = quaternion_multiply(relative_rotation, self.rotation)
 
-        # Calculate translation
-        if has_joint_properties:
-            # Standard case: compute relative translation using joint positions
-            def rotate_vector(q, v):
-                qx, qy, qz, qw = q
-                vx, vy, vz = v
-                vq = [vx, vy, vz, 0.0]
-                q_inv = quaternion_inverse(q)
-                t = quaternion_multiply(q, vq)
-                t = quaternion_multiply(t, q_inv)
-                return [t[0], t[1], t[2]]
-
-            rotated_local_pos1 = rotate_vector(relative_rotation, local_pos1)
-            relative_translation = [
-                local_pos0[0] - rotated_local_pos1[0],
-                local_pos0[1] - rotated_local_pos1[1],
-                local_pos0[2] - rotated_local_pos1[2]
-            ]
-        else:
-            # Fallback case: use joint position directly if available, otherwise use link translation
-            joint_pos = joint.get_property('xformOp:translate')
-            if joint_pos and len(joint_pos) >= 3:
-                relative_translation = [float(joint_pos[0]), float(joint_pos[1]), float(joint_pos[2])]
-                logger.debug(f"  Using joint xformOp:translate: {relative_translation}")
-            else:
-                relative_translation = self.translation.copy()
-                logger.debug(f"  Using link translation as fallback: {relative_translation}")
+        rotated_local_pos1 = rotate_vector(relative_rotation, local_pos1)
+        relative_translation = [
+            local_pos0[0] - rotated_local_pos1[0],
+            local_pos0[1] - rotated_local_pos1[1],
+            local_pos0[2] - rotated_local_pos1[2]
+        ]
 
         logger.debug(f"  Final joint-corrected transform: pos={relative_translation}, rot={final_rotation}")
         return relative_translation, final_rotation, self.scale.copy()
@@ -422,12 +369,14 @@ class USDJoint:
         """Get local rotations of the joint attachment points on body0 and body1."""
         local_rot0 = local_rot1 = None
         if 'physics:localRot0' in self.properties and 'physics:localRot1' in self.properties:
+            print(f"[Test] Joint {self.name} has localRot0 and localRot1 properties")
             local_rot0 = self.get_property('physics:localRot0')
             local_rot1 = self.get_property('physics:localRot1')
         elif 'xformOp:orient' in self.properties:
             # Fallback to xformOp:orient if localRot0/localRot1 are not available
             local_rot0 = self.get_property('xformOp:orient')
-            # local_rot1 remains None in fallback case
+            
+        print(f"[Test] Joint {self.name} local rotations: {local_rot0}, {local_rot1}")
         
         # USD rotations are quaternions in (w, x, y, z) format, convert to (x, y, z, w)
         rot0 = None

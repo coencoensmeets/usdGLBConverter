@@ -39,7 +39,8 @@ from .math_utils import (
     quat_to_list,
     quaternion_multiply,
     quaternion_inverse,
-    euler_to_quat
+    euler_to_quat,
+    rotate_vector
 )
 from .usd_utils import get_prim_from_name, get_all_joints, print_data_prim
 
@@ -57,6 +58,7 @@ __all__ = [
     "quaternion_multiply", 
     "quaternion_inverse",
     "euler_to_quat",
+    "rotate_vector",
     
     # USD utility functions
     "get_prim_from_name",

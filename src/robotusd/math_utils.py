@@ -44,3 +44,22 @@ def quat_to_list(q: Gf.Quatf) -> List[float]:
     except AttributeError:
         # Fallback: try to cast to list
         return list(q)
+    
+def rotate_vector(q: List[float], v: List[float]) -> List[float]:
+    """
+    Rotate a 3D vector v by a quaternion q.
+
+    Args:
+        q: Quaternion in [x, y, z, w] format.
+        v: 3D vector as [x, y, z].
+
+    Returns:
+        Rotated 3D vector as [x, y, z].
+    """
+    qx, qy, qz, qw = q
+    vx, vy, vz = v
+    vq = [vx, vy, vz, 0.0]
+    q_inv = quaternion_inverse(q)
+    t = quaternion_multiply(q, vq)
+    t = quaternion_multiply(t, q_inv)
+    return [t[0], t[1], t[2]]

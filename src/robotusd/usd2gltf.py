@@ -95,6 +95,7 @@ class USDToGLTFConverter:
         if relative_scale != [1.0, 1.0, 1.0]:
             node_dict["scale"] = relative_scale
             
+        print(f"[Test] Creating glTF node for {link.name} with translation={relative_translation}, rotation={relative_rotation}, scale={relative_scale}")
         logger.debug(f"glTF node for {link.name}: translation={relative_translation}, rotation={relative_rotation}")
         return node_dict
 
@@ -151,11 +152,15 @@ class USDToGLTFConverter:
         if rotation.GetQuat() != Gf.Quatd(1.0, 0.0, 0.0, 0.0):
             rot_matrix = np.array(Gf.Matrix3d(rotation.GetQuat()), dtype=np.float32)
             points_array = np.dot(points_array, rot_matrix.T)
+            
+        print(f"Rotation applied: {rotation.GetQuat()} to mesh {usd_mesh.name}")
         
         # Apply translation
         if translation != Gf.Vec3d(0.0, 0.0, 0.0):
             translation_array = np.array([translation[0], translation[1], translation[2]], dtype=np.float32)
             points_array += translation_array
+            
+        print(f"Applying translation: {translation} to mesh {usd_mesh.name}")
         
         # Convert to list for glTF
         vertices = points_array.flatten().tolist()

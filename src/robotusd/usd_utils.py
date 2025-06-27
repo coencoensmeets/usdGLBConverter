@@ -53,5 +53,12 @@ def print_data_prim(prim_name:str):
         print(f"Properties:")
         for prop in prim.GetProperties():
             print(f"  - {prop.GetName()}: {prop.Get()}") if hasattr(prop, "Get") else print(f"  - {prop.GetName()}: No value")
+        for ref in prim.GetRelationships():
+            print(f"  - Relationship: {ref.GetName()}")
+            targets = ref.GetTargets()
+            if targets:
+                print(f"    Targets: {', '.join(str(t) for t in targets)}")
+            else:
+                print("    No targets")
     else:
         print(f"Prim with name {prim_name} not found.")

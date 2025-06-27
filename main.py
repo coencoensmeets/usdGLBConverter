@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 # Set logger to INFO level (no DEBUG messages)
 logger.setLevel(logging.INFO)
 
-
 if __name__ == "__main__":
     # Enable detailed debug logging to see transform extraction
     # logging.getLogger().setLevel(logging.DEBUG)

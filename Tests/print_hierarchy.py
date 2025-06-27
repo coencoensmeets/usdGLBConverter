@@ -47,6 +47,7 @@ def print_tree(prim, prefix="", is_last=True, parent_prim=None):
     if is_joint:
         # Check for physics relationships
         body0 = body1 = None
+        
         for rel in prim.GetRelationships():
             if rel.GetName() == "physics:body0":
                 targets = rel.GetTargets()
