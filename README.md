@@ -3,26 +3,32 @@
     <a href="https://github.com/coencoensmeets/usdGLBConverter">
         <img src="https://go.forrester.com/wp-content/uploads/2022/09/USDLogo400x400-267x300.png" alt="USD Logo" width="80" height="80">
     </a>
+    
+<h3 align="center">RobotUSD - USD to glTF Converter for Robotics Applications</h3>
 
-    <h3 align="center">RobotUSD - USD to glTF Converter for Robotics Applications</h3>
-
-    <p align="center">
-        High-performance Python package for converting USD (Universal Scene Description) robot models to glTF format.<br>
-        Specialized support for multi-material meshes, joint hierarchies, and robotics workflows.
-        <br />
-        <a href="https://github.com/coencoensmeets/usdGLBConverter"><strong>Explore the docs »</strong></a>
-        <br />
-        <br />
-        <a href="https://github.com/coencoensmeets/usdGLBConverter">View Demo</a>
-        ·
-        <a href="https://github.com/coencoensmeets/usdGLBConverter/issues">Report Bug</a>
-        ·
-        <a href="https://github.com/coencoensmeets/usdGLBConverter/issues">Request Feature</a>
-    </p>
+<p align="center">
+    High-performance Python package for converting USD (Universal Scene Description) robot models to glTF format.<br>
+    Specialized support for multi-material meshes, joint hierarchies, and robotics workflows.
+    <br />
+    <a href="https://github.com/coencoensmeets/usdGLBConverter"><strong>Explore the docs »</strong></a>
+    <br />
+    <br />
+    <a href="https://github.com/coencoensmeets/usdGLBConverter">View Demo</a>
+    ·
+    <a href="https://github.com/coencoensmeets/usdGLBConverter/issues">Report Bug</a>
+    ·
+    <a href="https://github.com/coencoensmeets/usdGLBConverter/issues">Request Feature</a>
+</p>
 </p>
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+<p align="center">
+    <a href="https://python.org">
+        <img src="https://img.shields.io/badge/python-3.8%2B-blue.svg" alt="Python Version">
+    </a>
+    <a href="LICENSE">
+        <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License">
+    </a>
+</p>
 
 ## Features
 
@@ -126,6 +132,40 @@ usdGLBConverter/
 ├── setup.py               # Package configuration
 └── README.md              # This file
 ```
+
+## Example robot models
+### Example Robot Models from NVIDIA Isaac Sim
+
+NVIDIA Isaac Sim provides a wide range of high-quality USD robot models that can be used for testing and development. These models include industrial arms, mobile robots, and humanoids, and are available for download from the official Isaac Sim documentation:
+
+- [Isaac Sim USD Robot Assets](https://docs.isaacsim.omniverse.nvidia.com/4.5.0/assets/usd_assets_robots.html)
+
+To download these models, follow the instructions on the [Isaac Sim Download Page](https://docs.isaacsim.omniverse.nvidia.com/4.5.0/installation/download.html).
+
+**Popular example robots include:**
+- Franka Emika Panda (`franka.usd`)
+- Universal Robots UR10 (`ur10.usd`)
+- KUKA iiwa (`kuka_iiwa.usd`)
+- Fetch Mobile Manipulator (`fetch.usd`)
+- Carter Mobile Robot (`carter.usd`)
+
+Once downloaded, you can use these USD files as input for the converter:
+
+```bash
+robotusd-convert path/to/franka.usd Output/franka.glb
+```
+
+Refer to the Isaac Sim documentation for more details on available robot assets and their structure.
+
+## Known Unsupported Robots
+
+The following robot models are known to have issues or are not currently supported by the converter. Note that not all available models have been tested.
+
+| Robot Model                | File Name                | Issue Status      | Notes                |
+|----------------------------|-------------------------|-------------------|----------------------|
+| KUKA KR210 L150            | Kuka/KR210_L150/kr210_l150.usd     | ❌ Not Working    | Link tranformations are wack     |
+
+If you encounter issues with other robot models, please report them via [GitHub Issues](https://github.com/coencoensmeets/usdGLBConverter/issues).
 
 ## Advanced Usage
 
