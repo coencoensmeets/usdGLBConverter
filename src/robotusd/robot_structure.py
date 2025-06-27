@@ -184,7 +184,7 @@ class USDLink:
         # Compose relative rotation between parent and child at the joint
         relative_rotation = quaternion_multiply(local_rot0, inv_local_rot1)
         # Compose with the link's own rotation
-        final_rotation = quaternion_multiply(relative_rotation, self.rotation)
+        # final_rotation = quaternion_multiply(relative_rotation, self.rotation)
 
         rotated_local_pos1 = rotate_vector(relative_rotation, local_pos1)
         relative_translation = [
@@ -193,8 +193,8 @@ class USDLink:
             local_pos0[2] - rotated_local_pos1[2]
         ]
 
-        logger.debug(f"  Final joint-corrected transform: pos={relative_translation}, rot={final_rotation}")
-        return relative_translation, final_rotation, self.scale.copy()
+        logger.debug(f"  Final joint-corrected transform: pos={relative_translation}, rot={relative_rotation}")
+        return relative_translation, relative_rotation, self.scale.copy()
 
     def _find_transform_prim_for_body(self, body_prim: Any) -> Optional[Any]:
         """Find the corresponding transform prim for a physics body prim."""

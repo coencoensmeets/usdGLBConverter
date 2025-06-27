@@ -19,20 +19,20 @@ if __name__ == "__main__":
     # logging.getLogger().setLevel(logging.DEBUG)
     # logger.setLevel(logging.DEBUG)
     
-    # stage: Usd.Stage = Usd.Stage.Open("Assets/Go2.usd")
-    # robot: USDRobot = USDRobot(stage, "Go2Robot")
-    # converter = USDToGLTFConverter(robot)
-    # converter.export("Output/Go2.glb")
+    stage: Usd.Stage = Usd.Stage.Open("Assets/Go2.usd")
+    robot: USDRobot = USDRobot(stage, "Go2Robot")
+    converter = USDToGLTFConverter(robot)
+    converter.export("Output/Go2.glb")
     
     # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Unitree/G1/g1.usd")
     # robot: USDRobot = USDRobot(stage, "G1")
     # converter = USDToGLTFConverter(robot)
     # converter.export("Output/G1.glb")
     
-    stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
-    robot: USDRobot = USDRobot(stage, "Franka")
-    converter = USDToGLTFConverter(robot)
-    converter.export("Output/Franka.glb")
+    # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
+    # robot: USDRobot = USDRobot(stage, "Franka")
+    # converter = USDToGLTFConverter(robot)
+    # converter.export("Output/Franka.glb")
     
     # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Festo/FestoCobot/festo_cobot.usd")
     # robot: USDRobot = USDRobot(stage, "Festo")
