@@ -573,6 +573,11 @@ class USDRobot:
     
     def _build_joint_tree(self, joint_data: List) -> Dict[Any, List[Any]]:
         """Build a tree structure from joint data to determine parent-child relationships."""
+        # Handle empty joint data
+        if not joint_data:
+            logger.warning("No joint data provided - returning empty structure")
+            return {'edges': {}, 'joint_map': {}, 'roots': set()}
+        
         # Collect all bodies and create edges based on joint connections
         all_bodies = set()
         edges = {}  # parent_body -> [child_bodies]
@@ -607,10 +612,14 @@ class USDRobot:
                 if 'base' in body.GetName().lower():
                     root_bodies = {body}
                     break
-            if not root_bodies:
+            if not root_bodies and all_bodies:
                 # Still no root, use the first body
                 root_bodies = {next(iter(all_bodies))}
                 logger.warning(f"Using arbitrary root: {next(iter(root_bodies)).GetName()}")
+            elif not all_bodies:
+                # No bodies at all - this is an error condition
+                logger.error("No bodies found in joint data - cannot build joint tree")
+                return {'edges': {}, 'joint_map': {}, 'roots': set()}
         
         return {'edges': edges, 'joint_map': joint_map, 'roots': root_bodies}
     
