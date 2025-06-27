@@ -19,10 +19,10 @@ if __name__ == "__main__":
     # logging.getLogger().setLevel(logging.DEBUG)
     # logger.setLevel(logging.DEBUG)
     
-    stage: Usd.Stage = Usd.Stage.Open("Assets/Go2.usd")
-    robot: USDRobot = USDRobot(stage, "Go2Robot")
-    converter = USDToGLTFConverter(robot)
-    converter.export("Output/Go2.glb")
+    # stage: Usd.Stage = Usd.Stage.Open("Assets/Go2.usd")
+    # robot: USDRobot = USDRobot(stage, "Go2Robot")
+    # converter = USDToGLTFConverter(robot)
+    # converter.export("Output/Go2.glb")
     
     # stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Unitree/G1/g1.usd")
     # robot: USDRobot = USDRobot(stage, "G1")
@@ -38,3 +38,8 @@ if __name__ == "__main__":
     # robot: USDRobot = USDRobot(stage, "Festo")
     # converter = USDToGLTFConverter(robot)
     # converter.export("Output/Festo.glb")
+    
+    stage: Usd.Stage = Usd.Stage.Open("Assets/Robots/Flexiv/Rizon4/flexiv_rizon4.usd")
+    robot: USDRobot = USDRobot(stage, "FlexivRizon4")
+    converter = USDToGLTFConverter(robot)
+    converter.export("Output/Flexiv.glb")

@@ -157,8 +157,7 @@ class USDLink:
         Calculate transform from parent link to this link using joint local positions/rotations.
         This composes the parent link's transform, the joint's localPos0/localRot0 (in parent),
         and the inverse of localPos1/localRot1 (in child).
-        The output rotation is the composed relative rotation between parent and child at the joint,
-        further composed with the link's own rotation.
+        The output rotation is the composed relative rotation between parent and child at the joint.
         """
         if not self.parent_joint or not self.parent_joint.parent_link:
             logger.debug(f"Link {self.name} is root - using world transform")
@@ -369,14 +368,11 @@ class USDJoint:
         """Get local rotations of the joint attachment points on body0 and body1."""
         local_rot0 = local_rot1 = None
         if 'physics:localRot0' in self.properties and 'physics:localRot1' in self.properties:
-            print(f"[Test] Joint {self.name} has localRot0 and localRot1 properties")
             local_rot0 = self.get_property('physics:localRot0')
             local_rot1 = self.get_property('physics:localRot1')
         elif 'xformOp:orient' in self.properties:
             # Fallback to xformOp:orient if localRot0/localRot1 are not available
             local_rot0 = self.get_property('xformOp:orient')
-            
-        print(f"[Test] Joint {self.name} local rotations: {local_rot0}, {local_rot1}")
         
         # USD rotations are quaternions in (w, x, y, z) format, convert to (x, y, z, w)
         rot0 = None
