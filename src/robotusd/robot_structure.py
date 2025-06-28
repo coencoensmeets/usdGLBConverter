@@ -4,7 +4,7 @@ import logging
 from pxr import Usd, UsdGeom, UsdShade, Gf
 import math
 import numpy as np
-from .math_utils import quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat, rotate_vector
+from .math_utils import quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat, rotate_vector, axis_to_quat
 from typing import List, Tuple, Optional, Dict, Any, Union, Set
 from collections import defaultdict
 
@@ -424,6 +424,122 @@ class USDJoint:
         local_pos_str = f", localPos0={local_pos0}, localPos1={local_pos1}" if local_pos0 or local_pos1 else ""
         
         return f"USDJoint({self.name}: {parent_name} -> {child_name}, type={self.joint_type}{axis_str}{limits_str}{local_pos_str})"
+    
+    def __repr__(self) -> str:
+        return self.__str__()
+
+class USDMesh:
+    """
+    Represents a mesh with its associated materials.
+    Can handle both single material assignment and multiple materials via GeomSubsets.
+    """
+    def __init__(self, mesh_prim: Any, material_prim: Any = None) -> None:
+        self.mesh_prim: Any = mesh_prim
+        self.name: str = mesh_prim.GetName()
+        self.path: str = str(mesh_prim.GetPath())
+        
+        # Handle both single material and multiple materials
+        self.material_prim: Optional[Any] = material_prim  # For backward compatibility
+        self.materials: List[Any] = []  # List of all materials
+        self.geom_subsets: List[Dict[str, Any]] = []  # List of GeomSubset info with materials
+        
+        # Performance optimization: pre-compute commonly used values
+        self._material_names_cache: Optional[List[str]] = None
+        self._has_material_cache: Optional[bool] = None
+        self._has_multiple_materials_cache: Optional[bool] = None
+        
+        # Initialize materials
+        if material_prim:
+            self.materials.append(material_prim)
+        
+        # Find all GeomSubset materials
+        self._find_geom_subset_materials_optimized()
+        
+        logger.debug(f"Creating USDMesh: {self.name} at {self.path}")
+        if self.materials:
+            material_names = self.get_all_material_names()
+            logger.debug(f"  -> Materials: {material_names}")
+    
+    def _find_geom_subset_materials_optimized(self) -> None:
+        """Find all GeomSubset children with material bindings - optimized version."""
+        # Batch process children for better performance
+        geom_subset_children = [child for child in self.mesh_prim.GetChildren() 
+                               if child.GetTypeName() == "GeomSubset"]
+        
+        for child in geom_subset_children:
+            # Check if this GeomSubset has a material binding
+            material_binding_api = UsdShade.MaterialBindingAPI(child)
+            if material_binding_api:
+                direct_binding = material_binding_api.GetDirectBinding()
+                if direct_binding and direct_binding.GetMaterial():
+                    material = direct_binding.GetMaterial().GetPrim()
+                    
+                    # Store GeomSubset info
+                    subset_info = {
+                        'geom_subset': child,
+                        'material': material,
+                        'name': child.GetName()
+                    }
+                    self.geom_subsets.append(subset_info)
+                    
+                    # Add to materials list if not already present
+                    if material not in self.materials:
+                        self.materials.append(material)
+                    
+                    logger.debug(f"  -> Found GeomSubset material: {child.GetName()} -> {material.GetName()}")
+    
+    def has_material(self) -> bool:
+        """Check if this mesh has any materials assigned (cached)."""
+        if self._has_material_cache is None:
+            self._has_material_cache = len(self.materials) > 0
+        return self._has_material_cache
+    
+    def has_multiple_materials(self) -> bool:
+        """Check if this mesh has multiple materials (cached)."""
+        if self._has_multiple_materials_cache is None:
+            self._has_multiple_materials_cache = len(self.materials) > 1
+        return self._has_multiple_materials_cache
+    
+    def get_all_material_names(self) -> List[str]:
+        """Get the names of all assigned materials (cached)."""
+        if self._material_names_cache is None:
+            self._material_names_cache = [mat.GetName() for mat in self.materials]
+        return self._material_names_cache
+    
+    def get_materials(self) -> List[Any]:
+        """Get all material prims."""
+        return self.materials.copy()
+    
+    def get_geom_subsets_with_materials(self) -> List[Dict[str, Any]]:
+        """Get all GeomSubsets with their associated materials."""
+        return self.geom_subsets.copy()
+    
+    def get_primary_material(self) -> Optional[Any]:
+        """Get the primary material (first one or the main material binding)."""
+        if self.material_prim:
+            return self.material_prim
+        elif self.materials:
+            return self.materials[0]
+        return None
+    
+    def get_material_count(self) -> int:
+        """Get the number of materials assigned to this mesh."""
+        return len(self.materials)
+    
+    def get_material_name(self) -> Optional[str]:
+        """Get the name of the first assigned material (for backward compatibility)."""
+        return self.materials[0].GetName() if self.materials else None
+    
+    def __str__(self) -> str:
+        if self.has_multiple_materials():
+            material_names = self.get_all_material_names()
+            material_info = f" ({len(material_names)} materials: {', '.join(material_names)})"
+        elif self.has_material():
+            material_info = f" (material: {self.get_material_name()})"
+        else:
+            material_info = " (no materials)"
+        
+        return f"USDMesh({self.name}{material_info})"
     
     def __repr__(self) -> str:
         return self.__str__()
@@ -1154,119 +1270,3 @@ class USDRobot:
     def __getitem__(self, key: str) -> USDLink:
         """Get a link by its name."""
         return self.links[key]
-
-class USDMesh:
-    """
-    Represents a mesh with its associated materials.
-    Can handle both single material assignment and multiple materials via GeomSubsets.
-    """
-    def __init__(self, mesh_prim: Any, material_prim: Any = None) -> None:
-        self.mesh_prim: Any = mesh_prim
-        self.name: str = mesh_prim.GetName()
-        self.path: str = str(mesh_prim.GetPath())
-        
-        # Handle both single material and multiple materials
-        self.material_prim: Optional[Any] = material_prim  # For backward compatibility
-        self.materials: List[Any] = []  # List of all materials
-        self.geom_subsets: List[Dict[str, Any]] = []  # List of GeomSubset info with materials
-        
-        # Performance optimization: pre-compute commonly used values
-        self._material_names_cache: Optional[List[str]] = None
-        self._has_material_cache: Optional[bool] = None
-        self._has_multiple_materials_cache: Optional[bool] = None
-        
-        # Initialize materials
-        if material_prim:
-            self.materials.append(material_prim)
-        
-        # Find all GeomSubset materials
-        self._find_geom_subset_materials_optimized()
-        
-        logger.debug(f"Creating USDMesh: {self.name} at {self.path}")
-        if self.materials:
-            material_names = self.get_all_material_names()
-            logger.debug(f"  -> Materials: {material_names}")
-    
-    def _find_geom_subset_materials_optimized(self) -> None:
-        """Find all GeomSubset children with material bindings - optimized version."""
-        # Batch process children for better performance
-        geom_subset_children = [child for child in self.mesh_prim.GetChildren() 
-                               if child.GetTypeName() == "GeomSubset"]
-        
-        for child in geom_subset_children:
-            # Check if this GeomSubset has a material binding
-            material_binding_api = UsdShade.MaterialBindingAPI(child)
-            if material_binding_api:
-                direct_binding = material_binding_api.GetDirectBinding()
-                if direct_binding and direct_binding.GetMaterial():
-                    material = direct_binding.GetMaterial().GetPrim()
-                    
-                    # Store GeomSubset info
-                    subset_info = {
-                        'geom_subset': child,
-                        'material': material,
-                        'name': child.GetName()
-                    }
-                    self.geom_subsets.append(subset_info)
-                    
-                    # Add to materials list if not already present
-                    if material not in self.materials:
-                        self.materials.append(material)
-                    
-                    logger.debug(f"  -> Found GeomSubset material: {child.GetName()} -> {material.GetName()}")
-    
-    def has_material(self) -> bool:
-        """Check if this mesh has any materials assigned (cached)."""
-        if self._has_material_cache is None:
-            self._has_material_cache = len(self.materials) > 0
-        return self._has_material_cache
-    
-    def has_multiple_materials(self) -> bool:
-        """Check if this mesh has multiple materials (cached)."""
-        if self._has_multiple_materials_cache is None:
-            self._has_multiple_materials_cache = len(self.materials) > 1
-        return self._has_multiple_materials_cache
-    
-    def get_all_material_names(self) -> List[str]:
-        """Get the names of all assigned materials (cached)."""
-        if self._material_names_cache is None:
-            self._material_names_cache = [mat.GetName() for mat in self.materials]
-        return self._material_names_cache
-    
-    def get_materials(self) -> List[Any]:
-        """Get all material prims."""
-        return self.materials.copy()
-    
-    def get_geom_subsets_with_materials(self) -> List[Dict[str, Any]]:
-        """Get all GeomSubsets with their associated materials."""
-        return self.geom_subsets.copy()
-    
-    def get_primary_material(self) -> Optional[Any]:
-        """Get the primary material (first one or the main material binding)."""
-        if self.material_prim:
-            return self.material_prim
-        elif self.materials:
-            return self.materials[0]
-        return None
-    
-    def get_material_count(self) -> int:
-        """Get the number of materials assigned to this mesh."""
-        return len(self.materials)
-    
-    def get_material_name(self) -> Optional[str]:
-        """Get the name of the first assigned material (for backward compatibility)."""
-        return self.materials[0].GetName() if self.materials else None
-    
-    def __str__(self) -> str:
-        if self.has_multiple_materials():
-            material_names = self.get_all_material_names()
-            material_info = f" ({len(material_names)} materials: {', '.join(material_names)})"
-        elif self.has_material():
-            material_info = f" (material: {self.get_material_name()})"
-        else:
-            material_info = " (no materials)"
-        
-        return f"USDMesh({self.name}{material_info})"
-    
-    def __repr__(self) -> str:
-        return self.__str__()

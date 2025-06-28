@@ -35,6 +35,8 @@ __license__ = "MIT"
 # Import main classes for easy access
 from .robot_structure import USDRobot, USDLink, USDJoint, USDMesh
 from .usd2gltf import USDToGLTFConverter
+from .usdDHparameters import USDDHParameters
+from .robot_analysis import USDRobotAnalysis
 from .math_utils import (
     quat_to_list,
     quaternion_multiply,
@@ -52,6 +54,8 @@ __all__ = [
     "USDJoint",
     "USDMesh",
     "USDToGLTFConverter",
+    "USDDHParameters",
+    "USDRobotAnalysis",
     
     # Utility functions
     "quat_to_list",

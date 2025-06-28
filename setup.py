@@ -79,8 +79,9 @@ setup(
     # Entry points for command-line tools
     entry_points={
         'console_scripts': [
-            'robotusd-convert=robotusd.cli:main',
-            'robotusd-info=robotusd.cli:info_command',
+            'robotusd=robotusd.cli:main',
+            'robotusd-convert=robotusd.cli:main_convert',
+            'robotusd-info=robotusd.cli:main_info',
         ],
     },
     
@@ -130,6 +131,20 @@ setup(
 )
 
 # Only show message during actual installation, not during build
+def print_post_install_message():
+    """Print helpful message after installation."""
+    print("\n" + "="*60)
+    print("🎉 RobotUSD installation complete!")
+    print("="*60)
+    print("Available commands:")
+    print("  robotusd convert <input.usd> <output.glb>  - Convert USD to glTF")
+    print("  robotusd info <input.usd>                  - Show basic robot info")
+    print("  robotusd analyze <input.usd>               - Comprehensive robot analysis")
+    print("\nOr use individual commands:")
+    print("  robotusd-convert, robotusd-info")
+    print("\nFor help: robotusd --help")
+    print("="*60 + "\n")
+
 if 'install' in sys.argv:
     import atexit
     atexit.register(print_post_install_message)

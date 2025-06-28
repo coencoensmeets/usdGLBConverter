@@ -8,6 +8,7 @@ import sys
 import os
 import logging
 import time
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -218,6 +219,91 @@ def info_command(args) -> int:
         return 1
 
 
+def analyze_command(args) -> int:
+    """Handle the analyze command to perform comprehensive robot analysis."""
+    try:
+        # Import here to avoid dependency issues if USD is not installed
+        from pxr import Usd
+        from robotusd import USDRobot, USDRobotAnalysis, USDDHParameters, check_dependencies
+        
+        # Check dependencies
+        if not check_dependencies():
+            logger.error("Required dependencies are not available")
+            return 1
+        
+        # Validate input file
+        if not validate_input_file(args.input):
+            return 1
+        
+        logger.info(f"Performing comprehensive analysis of USD file: {args.input}")
+        start_time = time.perf_counter()
+        
+        # Load USD stage
+        stage = Usd.Stage.Open(args.input)
+        if not stage:
+            logger.error(f"Failed to open USD file: {args.input}")
+            return 1
+        
+        # Create robot structure
+        logger.info("Building robot structure...")
+        robot = USDRobot(stage, args.robot_name)
+        
+        if not robot.links:
+            logger.error("No robot links found in USD file")
+            return 1
+        
+        logger.info(f"Found {len(robot.links)} links and {len(robot.joints)} joints")
+        
+        # Perform robot analysis
+        logger.info("Performing robot analysis...")
+        analyzer = USDRobotAnalysis(robot)
+        
+        # Print comprehensive analysis report
+        if not args.quiet:
+            print("\n" + analyzer.get_analysis_report())
+        
+        # If requested, also perform DH parameter analysis
+        if args.dh_parameters:
+            logger.info("Analyzing DH parameters...")
+            dh_analyzer = USDDHParameters(robot)
+            dh_params = dh_analyzer.get_dh_parameters()
+            
+            if dh_params:
+                print(f"\n📐 DH PARAMETERS ANALYSIS")
+                print("-" * 30)
+                print(f"Total joints analyzed: {len(dh_params)}")
+                print()
+                
+                for i, param in enumerate(dh_params):
+                    print(f"Joint {i+1}: {param['joint_name']}")
+                    print(f"  Type: {param['joint_type']}")
+                    print(f"  theta: {param['theta']:.3f} rad ({math.degrees(param['theta']):.1f}°)")
+                    print(f"  d:     {param['d']:.3f}")
+                    print(f"  a:     {param['a']:.3f}")
+                    print(f"  alpha: {param['alpha']:.3f} rad ({math.degrees(param['alpha']):.1f}°)")
+                    if 'error' in param:
+                        print(f"  ⚠️  Error: {param['error']}")
+                    print()
+        
+        # Performance summary
+        end_time = time.perf_counter()
+        if not args.quiet:
+            print(f"\nAnalysis completed in {end_time - start_time:.2f} seconds")
+        
+        return 0
+        
+    except ImportError as e:
+        logger.error(f"Missing required dependencies: {e}")
+        logger.error("Please install USD library (usd-core) and other dependencies")
+        return 1
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create the command-line argument parser."""
     parser = argparse.ArgumentParser(
@@ -232,8 +318,14 @@ Examples:
   # Convert with custom robot name
   robotusd-convert robot.usd robot.glb --robot-name "MyRobot"
   
-  # Get information about a USD robot
+  # Get basic information about a USD robot
   robotusd-info robot.usd
+  
+  # Perform comprehensive robot analysis
+  robotusd-analyze robot.usd
+  
+  # Analyze with DH parameters
+  robotusd-analyze robot.usd --dh-parameters
   
   # Verbose output for debugging
   robotusd-convert robot.usd robot.glb --verbose
@@ -284,14 +376,36 @@ Examples:
     # Info command
     info_parser = subparsers.add_parser(
         'info',
-        help='Display information about a USD robot file',
-        description='Analyze and display information about a USD robot file'
+        help='Display basic information about a USD robot file',
+        description='Analyze and display basic information about a USD robot file'
     )
     info_parser.add_argument(
         'input',
         help='Input USD file path'
     )
     info_parser.set_defaults(func=info_command)
+    
+    # Analyze command
+    analyze_parser = subparsers.add_parser(
+        'analyze',
+        help='Perform comprehensive robot analysis',
+        description='Perform comprehensive analysis of robot type, kinematics, and capabilities'
+    )
+    analyze_parser.add_argument(
+        'input',
+        help='Input USD file path'
+    )
+    analyze_parser.add_argument(
+        '--robot-name',
+        default='Robot',
+        help='Name for the robot (default: Robot)'
+    )
+    analyze_parser.add_argument(
+        '--dh-parameters',
+        action='store_true',
+        help='Include DH parameter analysis'
+    )
+    analyze_parser.set_defaults(func=analyze_command)
     
     return parser
 
