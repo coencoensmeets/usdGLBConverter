@@ -73,7 +73,7 @@ class USDLink:
             logger.debug(f"Link {self.name} is base - using local transform as world transform")
         else:
             # Get parent's world transform and joint transform
-            parent_world_transform = self.parent_joint.parent_link.world_transform
+            parent_world_transform = self.parent_joint.get_world_transform()
             joint_transform = self.parent_joint.transform_joint_to_child
             
             # World transform = Parent_world * Joint_transform * Link_local
@@ -369,10 +369,12 @@ class USDJoint:
     
     def get_world_transform(self) -> HomogeneousMatrix:
         """Get the world transformation as HomogeneousMatrix object for the joint frame position."""
+        rot0, rot1 = self.get_local_rotations()
+        parent_to_joint = HomogeneousMatrix.from_pose(self.get_local_positions()[0], rot0)
         if not self.parent_link:
-            return self._parent_to_joint.copy()
+            return parent_to_joint.copy()
         
-        return self.parent_link.world_transform * self._parent_to_joint.copy()
+        return self.parent_link.world_transform * parent_to_joint.copy()
     
     def get_world_pose(self) -> Tuple[List[float], List[float]]:
         """Get world pose as (translation, quaternion)."""
@@ -382,6 +384,7 @@ class USDJoint:
         """Align the joint to the world coordinate system."""
         
         # Get the current world transform
+        self.parent_link.reset_world_transform()
         old_world_to_joint = self.get_world_transform()
         new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
 
@@ -525,7 +528,7 @@ class USDJoint:
         local_rot1_list = quat_to_list(local_rot1)
         
         if "Rotation" in self.config:
-            additional_quaternion = euler_to_quat(self.config['Rotation']['Roll'], self.config['Rotation']['Pitch'], self.config['Rotation']['Yaw'])
+            additional_quaternion = euler_to_quat(-self.config['Rotation']['Roll'], -self.config['Rotation']['Pitch'], -self.config['Rotation']['Yaw'])
             local_rot1_list = quat_multiply(additional_quaternion, local_rot1_list)
             print("Applying additional rotation to parent joint")
 
