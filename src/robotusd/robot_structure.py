@@ -80,7 +80,7 @@ class USDLink:
         else:
             # Get parent's world transform and joint transform
             parent_world_transform = self.parent_joint.parent_link.world_transform
-            joint_transform = self.parent_joint.transform_parent_to_joint
+            joint_transform = self.parent_joint.transform_joint_to_child
             
             # World transform = Parent_world * Joint_transform * Link_local
             self._world_transform = parent_world_transform * joint_transform * self._local_transform
@@ -384,13 +384,11 @@ class USDJoint:
     
     def align_to_world(self) -> None:
         """Align the joint to the world coordinate system."""
-        # Reset joint value to zero
-        self.joint_value = 0.0
         
         # Get the current world transform
         old_world_to_joint = self.get_world_transform()
         new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
-        
+
         self._parent_to_joint = self._parent_to_joint * old_world_to_joint.inverse() * new_world_to_joint
         self._joint_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._joint_to_child
     

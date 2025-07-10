@@ -418,11 +418,10 @@ class HomogeneousMatrix:
         return HomogeneousMatrix(self._matrix.copy())
     
     def __str__(self) -> str:
-        """String representation."""
-        trans = self.translation
-        quat = self.quaternion
-        return f"HomogeneousMatrix(translation=[{trans[0]:.3f}, {trans[1]:.3f}, {trans[2]:.3f}], quaternion=[{quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f}])"
-    
+        """String representation as a 4x4 matrix."""
+        mat = self._matrix
+        rows = ["[" + "  ".join(f"{v: .3f}" for v in row) + "]" for row in mat]
+        return "HomogeneousMatrix(\n" + "\n".join(rows) + "\n)"
     def __repr__(self) -> str:
         """Detailed string representation."""
         return f"HomogeneousMatrix(\n{self._matrix}\n)"
