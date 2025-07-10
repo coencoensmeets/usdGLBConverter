@@ -3,7 +3,7 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 import logging
 from .robot_structure import USDRobot, USDJoint, USDLink
-from .math_utils import quaternion_to_rotation_matrix, normalize_vector, vector_angle
+from .math_utils import HomogeneousMatrix, normalize_vector, vector_angle, rotation_matrix_to_quaternion
 
 logger = logging.getLogger(__name__)
 
@@ -164,24 +164,16 @@ class USDRobotAnalysis:
         revolute_joints = [j for j in analysis_joints if j.joint_type == 'revolute']
         prismatic_joints = [j for j in analysis_joints if j.joint_type == 'prismatic']
         
-        # Extract joint axes
-        joint_axes = []
-        for joint in analysis_joints:
-            axis = joint.get_axis()
-            if axis:
-                # Convert to primary axis label
-                abs_axis = [abs(x) for x in axis]
-                max_idx = abs_axis.index(max(abs_axis))
-                axis_label = ['X', 'Y', 'Z'][max_idx]
-            else:
-                axis_label = 'Z'  # Default
-            joint_axes.append(axis_label)
+        # Extract joint axes with cumulative transformations
+        joint_axes, transformed_axes = self._calculate_chain_transformed_axes(analysis_joints)
         
         # Calculate reach and other metrics
         total_reach = 0.0
-        for joint in analysis_joints:
+        for i, joint in enumerate(analysis_joints):
             if joint.child_link:
-                translation, _, _ = joint.child_link.calculate_joint_corrected_transform()
+                # Get the transform matrix for this joint to calculate link length
+                joint_matrix = joint.transform
+                translation = joint_matrix.translation
                 link_length = math.sqrt(translation[0]**2 + translation[1]**2 + translation[2]**2)
                 total_reach += link_length
         
@@ -575,15 +567,16 @@ class USDRobotAnalysis:
             return result
         
         # Check joint offsets (d parameters would need to be calculated from DH parameters)
-        # For now, we'll use a heuristic based on joint positions
+        # For now, we'll use a heuristic based on joint relative positions
         wrist_joints = []
         for idx in joint_indices:
             if idx < len(chain['joints']):
                 joint = chain['joints'][idx]
-                if joint.child_link:
-                    translation, _, _ = joint.child_link.calculate_joint_corrected_transform()
-                    offset = abs(translation[2])  # Z-offset approximation
-                    wrist_joints.append(offset)
+                # Use the joint's local transform rather than world position
+                joint_matrix = joint.transform
+                translation = joint_matrix.translation
+                offset = abs(translation[2])  # Z-offset approximation
+                wrist_joints.append(offset)
         
         if wrist_joints:
             max_offset = max(wrist_joints)
@@ -1137,3 +1130,44 @@ class USDRobotAnalysis:
                 'changes': axis_changes2
             })
         return result
+    
+    def _calculate_chain_transformed_axes(self, joints: List[USDJoint]) -> Tuple[List[str], List[List[float]]]:
+        """
+        Calculate joint axes with cumulative transformations through the kinematic chain.
+        
+        Args:
+            joints: List of joints in the kinematic chain
+            
+        Returns:
+            Tuple of (axis_labels, transformed_axis_vectors)
+        """
+        joint_axes = []
+        transformed_axes = []
+        
+        # Cumulative transformation from base to current joint
+        cumulative_transform = HomogeneousMatrix.identity()
+        
+        for i, joint in enumerate(joints):
+            # Get the local axis for this joint
+            local_axis = joint.get_local_axis()
+            if not local_axis:
+                local_axis = [1.0, 0.0, 0.0]  # Default to X-axis
+            
+            # Get the joint's transformation matrix
+            joint_transform = joint.transform
+            
+            # Update cumulative transformation
+            cumulative_transform = cumulative_transform * joint_transform
+            
+            # Transform the local axis to world coordinates
+            final_axis = cumulative_transform.transform_vector(local_axis)
+            
+            # Convert to primary axis label
+            abs_axis = [abs(x) for x in final_axis]
+            max_idx = abs_axis.index(max(abs_axis))
+            axis_label = ['X', 'Y', 'Z'][max_idx]
+            
+            joint_axes.append(axis_label)
+            transformed_axes.append(final_axis)
+        
+        return joint_axes, transformed_axes

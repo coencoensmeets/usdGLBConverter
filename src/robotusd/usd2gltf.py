@@ -4,6 +4,7 @@ import logging
 from pxr import UsdGeom, UsdShade, Gf
 import numpy as np
 from .robot_structure import USDRobot, USDLink, USDMesh
+from .math_utils import HomogeneousMatrix, quat_to_list, quaternion_multiply, quaternion_inverse, rotate_vector
 from typing import List, Tuple, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 class USDToGLTFConverter:
     """
     Converts a USD robot to glTF format using the robot hierarchy directly.
+    Refactored for clarity and consistent transform handling.
     """
     def __init__(self, usd_robot: USDRobot) -> None:
         self.robot: USDRobot = usd_robot
@@ -45,11 +47,11 @@ class USDToGLTFConverter:
         logger.info(f"Created {len(self.gltf_nodes)} glTF nodes")
 
     def _process_link_recursive(self, link: USDLink, parent_node_idx: Optional[int] = None) -> int:
-        """Recursively process links and create glTF nodes directly."""
-        # Create glTF node for this link
-        node_idx = len(self.gltf_nodes)
+        """Recursively process links and create glTF nodes with intermediate frame nodes."""
+        # Create glTF node for this link's geometry
+        geometry_node_idx = len(self.gltf_nodes)
         
-        # Create the glTF node dictionary
+        # Create the glTF node dictionary for the link geometry
         gltf_node = self._create_gltf_node_from_link(link)
         
         # Process materials for this link first
@@ -63,39 +65,49 @@ class USDToGLTFConverter:
         
         # Add to nodes list
         self.gltf_nodes.append(gltf_node)
-        self.link_to_node_idx[link] = node_idx
+        self.link_to_node_idx[link] = geometry_node_idx
         
-        logger.debug(f"Created glTF node {node_idx} for link: {link.name}")
+        logger.debug(f"Created glTF geometry node {geometry_node_idx} for link: {link.name}")
         
         # Add to parent's children if it has a parent
         if parent_node_idx is not None:
             if "children" not in self.gltf_nodes[parent_node_idx]:
                 self.gltf_nodes[parent_node_idx]["children"] = []
-            self.gltf_nodes[parent_node_idx]["children"].append(node_idx)
+            self.gltf_nodes[parent_node_idx]["children"].append(geometry_node_idx)
         
         # Process child joints and links
         for joint in link.joints:
             if joint.child_link:
-                child_node_idx = self._process_link_recursive(joint.child_link, node_idx)
+                # Create intermediate frame node for this joint
+                frame_node_idx = self._create_joint_frame_node(joint, geometry_node_idx)
+                child_node_idx = self._process_link_recursive(joint.child_link, frame_node_idx)
         
-        return node_idx
+        return geometry_node_idx
 
     def _create_gltf_node_from_link(self, link: USDLink) -> Dict[str, Any]:
-        """Create a glTF node dictionary from a USDLink."""
+        """Create a glTF node dictionary from a USDLink with proper relative transforms."""
         node_dict = {"name": link.name}
-        
-        # Use joint-corrected transform for proper positioning
-        relative_translation, relative_rotation, relative_scale = link.calculate_joint_corrected_transform()
-        
-        # Add transformation data if not default
-        if relative_translation != [0.0, 0.0, 0.0]:
-            node_dict["translation"] = relative_translation
-        if relative_rotation != [0.0, 0.0, 0.0, 1.0]:
-            node_dict["rotation"] = relative_rotation
-        if relative_scale != [1.0, 1.0, 1.0]:
-            node_dict["scale"] = relative_scale
-            
-        logger.debug(f"glTF node for {link.name}: translation={relative_translation}, rotation={relative_rotation}")
+
+        if link.parent_joint:
+            # Use the joint's transform property for the link's transform relative to the joint frame
+            local_matrix = link.parent_joint.transform_joint_to_child
+            translation, quaternion = self._extract_pose_from_matrix(local_matrix)
+            if translation != [0.0, 0.0, 0.0]:
+                node_dict["translation"] = translation
+            if quaternion != [0.0, 0.0, 0.0, 1.0]:
+                node_dict["rotation"] = quaternion
+            logger.debug(f"glTF link node for {link.name} (child of joint {link.parent_joint.name}):")
+            logger.debug(f"  Final translation: {translation}")
+            logger.debug(f"  Final quaternion: {quaternion}")
+        else:
+            # Base link - use its local transform (relative to world origin)
+            local_matrix = HomogeneousMatrix(link.local_transform_matrix)
+            translation, quaternion = self._extract_pose_from_matrix(local_matrix)
+            if translation != [0.0, 0.0, 0.0]:
+                node_dict["translation"] = translation
+            if quaternion != [0.0, 0.0, 0.0, 1.0]:
+                node_dict["rotation"] = quaternion
+            logger.debug(f"glTF base link node for {link.name}: translation={translation}, rotation={quaternion}")
         return node_dict
 
     def _process_link_meshes(self, link: USDLink) -> List[int]:
@@ -594,3 +606,33 @@ class USDToGLTFConverter:
         except Exception as e:
             logger.error(f"Error processing GeomSubset {geom_subset_prim.GetName()}: {e}")
             return []
+    
+    def _create_joint_frame_node(self, joint, parent_node_idx: int) -> int:
+        """Create an intermediate frame node for a joint using its transform_parent_to_joint property."""
+        frame_node_idx = len(self.gltf_nodes)
+        frame_node = {"name": f"{joint.name}_frame"}
+
+        # Use the joint's transform_parent_to_joint property for the frame node
+        joint_frame_matrix = joint.transform_parent_to_joint
+        translation, quaternion = self._extract_pose_from_matrix(joint_frame_matrix)
+        if translation != [0.0, 0.0, 0.0]:
+            frame_node["translation"] = translation
+        if quaternion != [0.0, 0.0, 0.0, 1.0]:
+            frame_node["rotation"] = quaternion
+
+        self.gltf_nodes.append(frame_node)
+        if "children" not in self.gltf_nodes[parent_node_idx]:
+            self.gltf_nodes[parent_node_idx]["children"] = []
+        self.gltf_nodes[parent_node_idx]["children"].append(frame_node_idx)
+        logger.debug(f"Created joint frame node {frame_node_idx} for joint: {joint.name}")
+        logger.debug(f"  Translation: {translation}")
+        logger.debug(f"  Rotation: {quaternion}")
+        return frame_node_idx
+
+    def _extract_pose_from_matrix(self, matrix: HomogeneousMatrix) -> Tuple[List[float], List[float]]:
+        """Helper to extract translation and quaternion from a HomogeneousMatrix."""
+        translation, quaternion = matrix.pose
+        # Ensure lists for JSON serialization
+        translation = list(translation)
+        quaternion = list(quaternion)
+        return translation, quaternion
