@@ -1133,7 +1133,7 @@ class USDRobotAnalysis:
     
     def _calculate_chain_transformed_axes(self, joints: List[USDJoint]) -> Tuple[List[str], List[List[float]]]:
         """
-        Calculate joint axes with cumulative transformations through the kinematic chain.
+        Calculate joint axes in world coordinates using the joint's transform.
         
         Args:
             joints: List of joints in the kinematic chain
@@ -1144,30 +1144,19 @@ class USDRobotAnalysis:
         joint_axes = []
         transformed_axes = []
         
-        # Cumulative transformation from base to current joint
-        cumulative_transform = HomogeneousMatrix.identity()
-        
-        for i, joint in enumerate(joints):
-            # Get the local axis for this joint
-            local_axis = joint.get_local_axis()
-            if not local_axis:
-                local_axis = [1.0, 0.0, 0.0]  # Default to X-axis
-            
-            # Get the joint's transformation matrix
-            joint_transform = joint.transform
-            
-            # Update cumulative transformation
-            cumulative_transform = cumulative_transform * joint_transform
-            
-            # Transform the local axis to world coordinates
-            final_axis = cumulative_transform.transform_vector(local_axis)
+        for joint in joints:
+            # Get the axis in world coordinates using the joint's get_axis method
+            world_axis = joint.get_axis()
+            if not world_axis:
+                # Default to X-axis if no axis is defined
+                world_axis = [1.0, 0.0, 0.0]
             
             # Convert to primary axis label
-            abs_axis = [abs(x) for x in final_axis]
+            abs_axis = [abs(x) for x in world_axis]
             max_idx = abs_axis.index(max(abs_axis))
             axis_label = ['X', 'Y', 'Z'][max_idx]
             
             joint_axes.append(axis_label)
-            transformed_axes.append(final_axis)
+            transformed_axes.append(world_axis)
         
         return joint_axes, transformed_axes

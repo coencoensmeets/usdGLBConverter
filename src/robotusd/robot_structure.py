@@ -453,8 +453,12 @@ class USDJoint:
             return None
         
         # Transform local axis to world coordinates using world transform matrix
-        world_transform = self.get_world_transform()
-        world_axis = world_transform.transform_vector(local_axis)
+        rot0, rot1 = self.get_local_rotations()
+        parent_to_joint = HomogeneousMatrix.from_pose(self.get_local_positions()[0], rot0)
+        world_to_joint = self.parent_link.world_transform*parent_to_joint if self.parent_link else HomogeneousMatrix.identity()
+        world_axis = world_to_joint.transform_vector(local_axis)
+        # Round to 3 decimals for the axis
+        world_axis = [round(x, 3) for x in world_axis]
         return world_axis
     
     def get_local_axis(self) -> Optional[List[float]]:
@@ -476,17 +480,6 @@ class USDJoint:
             return None
             
         return base_axis
-    
-    def get_joint_frame_axis(self) -> Optional[List[float]]:
-        """Get the joint axis vector in the joint frame (after applying localRot0/localRot1 transformations)."""
-        local_axis = self.get_local_axis()
-        if not local_axis:
-            return None
-        
-        # Transform the axis through the joint frame transformation
-        # This applies the localRot0 and localRot1 transformations that define the joint frame
-        joint_axis = self._parent_to_joint.transform_vector(local_axis)
-        return joint_axis
     
     def get_limits(self) -> Tuple[Optional[float], Optional[float]]:
         """Get joint limits (lower, upper)."""
