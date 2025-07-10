@@ -5,13 +5,7 @@ from pxr import Usd, UsdGeom, UsdShade, Gf
 import math
 import numpy as np
 from .math_utils import (
-    quat_to_list, quaternion_multiply, quaternion_inverse, euler_to_quat, 
-    rotate_vector, axis_to_quat, HomogeneousMatrix,
-    # Backward compatibility functions
-    pose_to_homogeneous_matrix, homogeneous_matrix_to_pose, 
-    multiply_homogeneous_matrices, inverse_homogeneous_matrix, 
-    transform_point, transform_vector, quaternion_to_homogeneous_matrix, 
-    translation_to_homogeneous_matrix
+    quat_to_list, euler_to_quat, HomogeneousMatrix, quat_multiply
 )
 from typing import List, Tuple, Optional, Dict, Any, Union, Set
 from collections import defaultdict
@@ -293,13 +287,15 @@ class USDJoint:
     Represents a robot joint connecting two links.
     Uses homogeneous transformation matrices for all pose calculations.
     """
-    def __init__(self, joint_prim: Any, parent_link: USDLink = None, child_link: USDLink = None) -> None:
+    def __init__(self, joint_prim: Any, parent_link: USDLink = None, child_link: USDLink = None, config: Optional[Dict[str, Any]] = None) -> None:
         self.prim: Any = joint_prim
         self.name: str = joint_prim.GetName()
         self.parent_link: Optional[USDLink] = parent_link
         self.child_link: Optional[USDLink] = child_link
         self.joint_type: str = self._determine_joint_type()
         self.properties: Dict[str, Any] = self._extract_joint_properties()
+        
+        self.config: Dict[str, Any] = config if config else {}
         
         # Extract joint transform from local positions and rotations
         self._joint_value = 0.0  # Current joint value (angle or displacement)
@@ -527,6 +523,11 @@ class USDJoint:
         
         local_rot0_list = quat_to_list(local_rot0)
         local_rot1_list = quat_to_list(local_rot1)
+        
+        if "Rotation" in self.config:
+            additional_quaternion = euler_to_quat(self.config['Rotation']['Roll'], self.config['Rotation']['Pitch'], self.config['Rotation']['Yaw'])
+            local_rot1_list = quat_multiply(additional_quaternion, local_rot1_list)
+            print("Applying additional rotation to parent joint")
 
         if local_rot0_list and len(local_rot0_list) == 4:
             rot0 = [local_rot0_list[1], local_rot0_list[2], local_rot0_list[3], local_rot0_list[0]]  # w,x,y,z -> x,y,z,w
@@ -719,13 +720,15 @@ class USDRobot:
     """
     Represents a complete robot with hierarchical link and joint structure.
     """
-    def __init__(self, stage: Usd.Stage, name: str = "Robot") -> None:
+    def __init__(self, stage: Usd.Stage, name: str = "Robot", config:Optional[Dict[str, Any]] = None) -> None:
         self.stage: Usd.Stage = stage
         self.name: str = name
         self.base_link: Optional[USDLink] = None
         self.links: Dict[str, USDLink] = {}
         self.joints: Dict[str, USDJoint] = {}
         self.link_prims: Dict[Any, USDLink] = {}  # Map prim to link
+        
+        self.config: Dict[str, Any] = config if config else {}
         
         # Performance optimization: caches
         self._prim_cache: Dict[str, Any] = {}
@@ -846,7 +849,12 @@ class USDRobot:
         
         # First, create all joints
         for joint_prim, body0, body1 in joint_data:
-            joint = USDJoint(joint_prim)
+            joint_name = joint_prim.GetName()
+            config = None
+            if joint_name in self.config['Joints']:
+                config = self.config['Joints'][joint_name]
+                logger.debug(f"Using config for joint {joint_name}: {config}")
+            joint = USDJoint(joint_prim, config=config)
             self.joints[joint.name] = joint
             logger.debug(f"Created joint: {joint.name}")
         
