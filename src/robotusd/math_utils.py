@@ -264,6 +264,25 @@ class HomogeneousMatrix:
         return self._matrix[0:3, 3].tolist()
     
     @property
+    def euler_angles(self) -> List[float]:
+        """Get the Euler angles (Roll, Pitch, Yaw) from the rotation matrix."""
+        r = self.rotation_matrix
+        sy = math.sqrt(r[0, 0] * r[0, 0] + r[1, 0] * r[1, 0])
+        
+        singular = sy < 1e-6
+        
+        if not singular:
+            x = math.atan2(r[2, 1], r[2, 2])
+            y = math.atan2(-r[2, 0], sy)
+            z = math.atan2(r[1, 0], r[0, 0])
+        else:
+            x = math.atan2(-r[1, 2], r[1, 1])
+            y = math.atan2(-r[2, 0], sy)
+            z = 0.0
+        
+        return [math.degrees(x), math.degrees(y), math.degrees(z)]
+    
+    @property
     def rotation_matrix(self) -> np.ndarray:
         """Get the 3x3 rotation matrix component."""
         return self._matrix[0:3, 0:3].copy()

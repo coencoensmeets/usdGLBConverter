@@ -53,7 +53,6 @@ class USDRobotAnalysis:
 			- robot_type: Detected robot type (arm, quadruped, humanoid, etc.)
 			- kinematic_chains: Analysis of all kinematic chains
 			- dof_analysis: Degrees of freedom analysis
-			- anthropomorphic_analysis: Anthropomorphic configuration analysis
 		"""
 		if self._analysis_cache is None:
 			self._analysis_cache = self._perform_robot_analysis()
@@ -69,7 +68,7 @@ class USDRobotAnalysis:
 			'kinematic_chains': [],
 			'primary_chain': None,
 			'dof_analysis': {},
-			'anthropomorphic_analysis': {},
+			'solver_analysis': {},
 			'statistics': {},
 			'warnings': []
 		}
@@ -87,9 +86,15 @@ class USDRobotAnalysis:
 		robot_type_analysis = self._classify_robot_type(chains)
 		analysis.update(robot_type_analysis)
 		
-		# Step 2.5: Detect gripper configurations
-		gripper_analysis = self._detect_gripper_configuration(chains)
-		analysis['gripper_analysis'] = gripper_analysis
+		# Step 2.5: Detect gripper configurations (only for robot arms)
+		if analysis['robot_type'] == 'robot_arm':
+			gripper_analysis = self._detect_gripper_configuration(chains)
+			analysis['gripper_analysis'] = gripper_analysis
+		
+		# Step 2.6: Analyze tool offsets in world frame (only for robot arms)
+		if analysis['robot_type'] == 'robot_arm':
+			tool_analysis = self._analyze_tool_offsets(chains)
+			analysis['tool_analysis'] = tool_analysis
 		
 		# Step 3: Analyze primary kinematic chain
 		if chains:
@@ -101,7 +106,7 @@ class USDRobotAnalysis:
 			
 			# Step 5: Anthropomorphic analysis (if robot arm)
 			if analysis['robot_type'] == 'robot_arm':
-				analysis['anthropomorphic_analysis'] = self._analyze_anthropomorphic_config(primary_chain)
+				analysis['solver_analysis'] = self._analyze_solvers_config(primary_chain)
 				
 		
 		# Step 7: Calculate overall statistics
@@ -507,8 +512,8 @@ class USDRobotAnalysis:
 		
 		return dof_analysis
 	
-	def _analyze_anthropomorphic_config(self, primary_chain: Dict[str, Any]) -> Dict[str, Any]:
-		"""Analyze anthropomorphic configuration for robot arms."""
+	def _analyze_solvers_config(self, primary_chain: Dict[str, Any]) -> Dict[str, Any]:
+		"""Analyze solver configuration for robot arms."""
 		
 		analysis = {
 			'solvers': {},
@@ -525,16 +530,12 @@ class USDRobotAnalysis:
 		# For gripper-equipped arms, only analyze the first 6 revolute joints
 		chain_revolute_count = primary_chain['revolute_count'] if 'arm' in primary_chain['chain_type'] else primary_chain['length']
 		
-		if chain_revolute_count != 6:
-			analysis['configuration_issues'].append(f"Not a 6-DOF revolute chain ({chain_revolute_count} DOF) - anthropomorphic analysis not applicable")
-			return analysis
-		
 		# Extract only the revolute joints for anthropomorphic analysis
 		revolute_joints = [joint for joint in primary_chain['joints'] if joint.joint_type == 'revolute']
 		
 		aligned_joints = self._validate_aligned_joints({'joints': revolute_joints})
 		if False in aligned_joints:
-			analysis['configuration_issues'].append("One or more joints are not aligned - cannot be anthropomorphic")
+			analysis['configuration_issues'].append("One or more joints are not aligned - cannot be a solved")
 			return analysis
 		
 		joint_axes = [XYZList_to_string(joint.get_axis()) for joint in revolute_joints]
@@ -559,12 +560,9 @@ class USDRobotAnalysis:
 			
 			# Check if the joint axes match the expected sequence
 			analysis['solvers'][solver] = {}
-			if all(joint_axes[i] == sequence[i] for i in range(len(sequence))):
-				analysis['solvers'][solver]['sequence'] = True
-			else:
-				analysis['solvers'][solver]['sequence'] = False
-				analysis['configuration_issues'].append(f"Joint axes do not match solver '{solver}' sequence")
-		
+			sequence_match = all(joint_axes[i] == sequence[i] for i in range(len(sequence)))
+			analysis['solvers'][solver]['sequence'] = sequence_match
+			
 			# Check translation compatibility
 			translate_compatible = True
 			for i in range(len(translate)):
@@ -573,7 +571,20 @@ class USDRobotAnalysis:
 		
 			analysis['solvers'][solver]['translate'] = translate_compatible
 			
-			analysis['solvers'][solver]['compatible'] = analysis['solvers'][solver]['sequence'] and translate_compatible
+			# If sequence doesn't match, check if it can be transformed via base pose orientation
+			if not sequence_match:
+				transform_result = self._check_base_pose_transformability(joint_axes, sequence, joint_local_transforms, translate)
+				analysis['solvers'][solver]['transformable'] = transform_result['transformable']
+				if transform_result['transformable']:
+					analysis['solvers'][solver]['required_orientation'] = transform_result['orientation']
+					analysis['solvers'][solver]['transform_translate_compatible'] = transform_result['translate_compatible']
+				else:
+					analysis['solvers'][solver]['transformable'] = False
+				analysis['configuration_issues'].append(f"Joint axes do not match solver '{solver}' sequence")
+			else:
+				analysis['solvers'][solver]['transformable'] = False  # No transformation needed
+			
+			analysis['solvers'][solver]['compatible'] = sequence_match and translate_compatible
 		return analysis
 	
 	def _calculate_robot_statistics(self) -> Dict[str, Any]:
@@ -833,47 +844,24 @@ class USDRobotAnalysis:
 		if dof['has_redundancy']:
 			report += "✓ Has kinematic redundancy\n"
 		
-		# Anthropomorphic Analysis (for robot arms)
+		# Gripper Analysis (only for robot arms)
 		if analysis['robot_type'] == 'robot_arm':
-			report += "\n🦾 ANTHROPOMORPHIC ANALYSIS\n"
-			report += "-" * 32 + "\n"
-			anthro = analysis['anthropomorphic_analysis']
-			
-			if anthro['is_anthropomorphic']:
-				report += "✓ Anthropomorphic configuration detected\n"
-				report += f"  Pattern: {'-'.join(anthro['axis_sequence'])}\n"
-				if anthro['has_spherical_wrist']:
-					report += "✓ Spherical wrist confirmed\n"
-			elif anthro['is_anthropomorphic2']:
-				report += "✓ Anthropomorphic2 configuration detected\n"
-				report += f"  Pattern: {'-'.join(anthro['axis_sequence'])}\n"
-			else:
-				report += "⚪ Non-standard configuration\n"
-				report += f"  Pattern: {'-'.join(anthro['axis_sequence'])}\n"
-				report += f"  Match score: {anthro['pattern_match_score']}%\n"
-			
-			if anthro['configuration_issues']:
-				report += "\nConfiguration issues:\n"
-				for issue in anthro['configuration_issues']:
-					report += f"  ⚠ {issue}\n"
-		
-		# Gripper Analysis
-		gripper = analysis.get('gripper_analysis', {})
-		if gripper.get('has_gripper'):
-			report += "\n🤖 GRIPPER ANALYSIS\n"
-			report += "-" * 20 + "\n"
-			report += f"Gripper type: {gripper['gripper_type'].replace('_', ' ').title()}\n"
-			report += f"Finger count: {gripper['finger_count']}\n"
-			report += f"Gripper DOF: {gripper['gripper_dof']}\n"
-			report += f"Location: {gripper['gripper_location'].replace('_', ' ').title()}\n"
-			
-			if gripper['gripper_characteristics']:
-				report += f"Characteristics: {', '.join(gripper['gripper_characteristics'])}\n"
-			
-			if gripper['gripper_chains']:
-				report += f"\nGripper chains: {len(gripper['gripper_chains'])}\n"
-				for i, chain in enumerate(gripper['gripper_chains'][:3], 1):  # Show first 3
-					report += f"  Chain {i}: {len(chain['joint_names'])} joints\n"
+			gripper = analysis.get('gripper_analysis', {})
+			if gripper.get('has_gripper'):
+				report += "\n🤖 GRIPPER ANALYSIS\n"
+				report += "-" * 20 + "\n"
+				report += f"Gripper type: {gripper['gripper_type'].replace('_', ' ').title()}\n"
+				report += f"Finger count: {gripper['finger_count']}\n"
+				report += f"Gripper DOF: {gripper['gripper_dof']}\n"
+				report += f"Location: {gripper['gripper_location'].replace('_', ' ').title()}\n"
+				
+				if gripper['gripper_characteristics']:
+					report += f"Characteristics: {', '.join(gripper['gripper_characteristics'])}\n"
+				
+				if gripper['gripper_chains']:
+					report += f"\nGripper chains: {len(gripper['gripper_chains'])}\n"
+					for i, chain in enumerate(gripper['gripper_chains'][:3], 1):  # Show first 3
+						report += f"  Chain {i}: {len(chain['joint_names'])} joints\n"
 		
 		# Kinematic Chains
 		if analysis['kinematic_chains']:
@@ -891,8 +879,20 @@ class USDRobotAnalysis:
 				
 				report += f"  Joints: {' → '.join(chain['joint_names'])}\n"
 				report += f"  Types: {'-'.join(chain['joint_types'])}\n"
-				report += f"  Axes: {'-'.join(chain['axis_sequence'])}\n"
+				report += f"  Axes: {'-'.join(str(axis) for axis in chain['axis_sequence'])}\n"
 				report += f"  Reach: {chain['total_reach']:.3f} units\n"
+
+				# Add joint alignment to worldframe info
+				if 'aligned_joints' in chain and chain['aligned_joints']:
+					aligned_count = sum(chain['aligned_joints'])
+					total_joints = len(chain['aligned_joints'])
+					report += f"  Joints aligned to worldframe: {aligned_count}/{total_joints}\n"
+					if aligned_count == total_joints:
+						report += "    ✓ All joints aligned to worldframe\n"
+					elif aligned_count == 0:
+						report += "    ✗ No joints aligned to worldframe\n"
+					else:
+						report += "    ⚠ Some joints not aligned to worldframe\n"
 				
 				# Show gripper information if present
 				if chain.get('gripper_info', {}).get('has_gripper'):
@@ -900,32 +900,100 @@ class USDRobotAnalysis:
 					report += f"  Gripper: {gripper['finger_count']} fingers, {gripper['dof']} DOF\n"
 				
 				report += "\n"
+    
+		# Tool Analysis (only for robot arms)
+		if analysis['robot_type'] == 'robot_arm':
+			tool_analysis = analysis.get('tool_analysis', {})
+			if tool_analysis.get('has_tools'):
+				report += "\n🔧 TOOL ANALYSIS\n"
+				report += "-" * 15 + "\n"
+				report += f"Tool count: {tool_analysis['tool_count']}\n"
+				
+				if tool_analysis['primary_tool']:
+					primary = tool_analysis['primary_tool']
+					report += f"Primary tool: {primary['tool_frame_name']}\n"
+					report += f"  Chain length: {primary['chain_length']} DOF\n"
+					
+					# World frame position and orientation
+					world_pos = primary['tool_offset_world']['position']
+					world_rot = primary['tool_offset_world']['orientation']
+					report += f"  World position: [{world_pos[0]:.3f}, {world_pos[1]:.3f}, {world_pos[2]:.3f}]\n"
+					report += f"  World orientation: [{world_rot[0]:.3f}, {world_rot[1]:.3f}, {world_rot[2]:.3f}]\n"
+					
+					# Local frame position and orientation
+					local_pos = primary['tool_offset_local']['position']
+					local_rot = primary['tool_offset_local']['orientation']
+					report += f"  Local position: [{local_pos[0]:.3f}, {local_pos[1]:.3f}, {local_pos[2]:.3f}]\n"
+					report += f"  Local orientation: [{local_rot[0]:.3f}, {local_rot[1]:.3f}, {local_rot[2]:.3f}]\n"
+					
+					if primary['characteristics']:
+						report += f"  Characteristics: {', '.join(primary['characteristics'])}\n"
+				
+				# Show all tools if more than one
+				if tool_analysis['tool_count'] > 1:
+					report += f"\nAll tools ({tool_analysis['tool_count']}):\n"
+					for i, tool in enumerate(tool_analysis['tools'], 1):
+						report += f"  Tool {i}: {tool['tool_frame_name']}\n"
+						world_pos = tool['tool_offset_world']['position']
+						report += f"    World position: [{world_pos[0]:.3f}, {world_pos[1]:.3f}, {world_pos[2]:.3f}]\n"
+						if tool['characteristics']:
+							report += f"    Type: {', '.join(tool['characteristics'])}\n"
+				
+				if tool_analysis['tool_characteristics']:
+					unique_chars = list(set(tool_analysis['tool_characteristics']))
+					report += f"\nTool characteristics: {', '.join(unique_chars)}\n"
+    
+		if analysis['robot_type'] == 'robot_arm':
+			report += "\n🤖 Solver ANALYSIS\n"
+			report += "-" * 30 + "\n"
+			anthro = analysis.get('solver_analysis', {})
+			print(f"TEST: {anthro}")
+			if anthro and anthro.get('solvers'):
+				report += "Solver compatibility:\n"
+				for solver, details in anthro['solvers'].items():
+					status = "✔" if details.get('compatible') else "✘"
+					report += f"  {status} {solver}\n"
+					report += f"    Sequence match: {details.get('sequence')}\n"
+					report += f"    Translate compatible: {details.get('translate', 'N/A')}\n"
+					
+					# Add transformability information
+					if details.get('transformable'):
+						report += f"    🔄 Transformable via base pose orientation: {details.get('required_orientation')}\n"
+						if details.get('transform_translate_compatible'):
+							report += f"    ✓ Transform translate compatible\n"
+						else:
+							report += f"    ✗ Transform translate incompatible\n"
+					elif not details.get('sequence'):
+						report += f"    ✗ Not transformable via base pose orientation\n"
+						
+				report += f"Axis sequence: {anthro.get('axis_sequence', [])}\n"
+			if anthro.get('configuration_issues'):
+				for issue in anthro['configuration_issues']:
+					report += f"  ⚠ {issue}\n"
 		
 		# Statistics
 		stats = analysis['statistics']
 		report += "\n📈 STATISTICS\n"
 		report += "-" * 12 + "\n"
+		report += f"Robot type: {analysis['robot_type']}\n"
 		report += f"Total links: {stats['total_links']}\n"
 		report += f"Total joints: {stats['total_joints']}\n"
 		report += f"Kinematic chains: {stats['total_chains']}\n"
+		report += f"Base link: {stats['base_link']}\n"
+		if analysis['robot_type'] == 'robot_arm':
+			if analysis.get('tool_analysis', {}).get('has_tools'):
+				report += f"Has tool(s): Yes\n"
+			else:
+				report += f"Has tool(s): No\n"
+			if analysis.get('gripper_analysis', {}).get('has_gripper'):
+				report += f"Has gripper: Yes\n"
+			else:
+				report += f"Has gripper: No\n"
 		
 		if stats['joint_type_distribution']:
 			report += "Joint distribution:\n"
 			for joint_type, count in stats['joint_type_distribution'].items():
 				report += f"  - {joint_type}: {count}\n"
-				
-		# Anthropomorphic Analysis (detailed solver compatibility)
-		anthro = analysis.get('anthropomorphic_analysis', {})
-		if anthro and anthro.get('solvers'):
-			report += "\nSolver compatibility:\n"
-			for solver, details in anthro['solvers'].items():
-				status = "✔" if details.get('compatible') else "✘"
-				report += f"  {status} {solver}\n"
-				report += f"    Sequence match: {details.get('sequence')}\n"
-				report += f"    Translate compatible: {details.get('translate', 'N/A')}\n"
-				report += f"Axis sequence: {anthro.get('axis_sequence', [])}\n"
-				if anthro.get('configuration_issues'):
-					report += f"Configuration issues: {anthro['configuration_issues']}\n"
 		
 		report += "\n" + "=" * 60
 		
@@ -999,3 +1067,299 @@ class USDRobotAnalysis:
 			logger.debug(f"Pruned end-effector joints: {pruned_names}")
 		
 		return pruned_joints
+	
+	def _check_base_pose_transformability(self, joint_axes: List[str], target_sequence: List[str], 
+										  joint_local_transforms: List[List[float]], translate: List[List[bool]]) -> Dict[str, Any]:
+		"""
+		Check if joint axes can be transformed to match target sequence by changing base pose orientation.
+		
+		Args:
+			joint_axes: Current joint axis sequence
+			target_sequence: Target solver sequence
+			joint_local_transforms: Current joint local transforms
+			translate: Translation compatibility matrix from solver
+			
+		Returns:
+			Dictionary with transformability information
+		"""
+		result = {
+			'transformable': False,
+			'orientation': None,
+			'translate_compatible': False
+		}
+		
+		if len(joint_axes) != len(target_sequence):
+			return result
+		
+		# Define possible base pose orientations and their axis transformations
+		# These represent 90-degree rotations around X, Y, Z axes
+		orientation_transforms = {
+			'identity': {'X': 'X', 'Y': 'Y', 'Z': 'Z'},
+			'rot_x_90': {'X': 'X', 'Y': 'Z', 'Z': 'Y'},
+			'rot_x_180': {'X': 'X', 'Y': 'Y', 'Z': 'Z'},
+			'rot_x_270': {'X': 'X', 'Y': 'Z', 'Z': 'Y'},
+			'rot_y_90': {'X': 'Z', 'Y': 'Y', 'Z': 'X'},
+			'rot_y_180': {'X': 'X', 'Y': 'Y', 'Z': 'Z'},
+			'rot_y_270': {'X': 'Z', 'Y': 'Y', 'Z': 'X'},
+			'rot_z_90': {'X': 'Y', 'Y': 'X', 'Z': 'Z'},
+			'rot_z_180': {'X': 'X', 'Y': 'Y', 'Z': 'Z'},
+			'rot_z_270': {'X': 'Y', 'Y': 'X', 'Z': 'Z'},
+		}
+		
+		# Try each orientation transformation
+		for orientation_name, transform_map in orientation_transforms.items():
+			# Transform the current joint axes
+			transformed_axes = []
+			for axis in joint_axes:
+				if axis in transform_map:
+					transformed_axes.append(transform_map[axis])
+				else:
+					transformed_axes.append(axis)  # Fallback
+			
+			# Check if transformed axes match target sequence
+			if transformed_axes == target_sequence:
+				# Check if the transformed local transforms are still compatible
+				translate_compatible = self._check_transformed_translate_compatibility(
+					joint_local_transforms, translate, orientation_name
+				)
+				
+				result['transformable'] = True
+				result['orientation'] = orientation_name
+				result['translate_compatible'] = translate_compatible
+				break
+		
+		return result
+	
+	def _check_transformed_translate_compatibility(self, joint_local_transforms: List[List[float]], 
+												   translate: List[List[bool]], orientation: str) -> bool:
+		"""
+		Check if local transforms are still compatible after base pose transformation.
+		
+		Args:
+			joint_local_transforms: Current joint local transforms
+			translate: Translation compatibility matrix
+			orientation: Applied orientation transformation
+			
+		Returns:
+			True if transforms are compatible after transformation
+		"""
+		if orientation == 'identity':
+			# No transformation needed, use original compatibility
+			translate_compatible = True
+			for i in range(len(translate)):
+				for j in range(3):
+					translate_compatible &= not (translate[i][j] == False and abs(joint_local_transforms[i][j]) > 1e-6)
+			return translate_compatible
+		
+		# Define transformation matrices for each orientation
+		transform_matrices = {
+			'rot_x_90': [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+			'rot_x_180': [[1, 0, 0], [0, -1, 0], [0, 0, -1]],
+			'rot_x_270': [[1, 0, 0], [0, 0, 1], [0, -1, 0]],
+			'rot_y_90': [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+			'rot_y_180': [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
+			'rot_y_270': [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+			'rot_z_90': [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+			'rot_z_180': [[-1, 0, 0], [0, -1, 0], [0, 0, 1]],
+			'rot_z_270': [[0, 1, 0], [-1, 0, 0], [0, 0, 1]],
+		}
+		
+		if orientation not in transform_matrices:
+			return False
+		
+		transform_matrix = transform_matrices[orientation]
+		
+		# Apply transformation to each joint's local transform
+		translate_compatible = True
+		for i in range(len(translate)):
+			if i >= len(joint_local_transforms):
+				continue
+				
+			# Transform the local translation vector
+			original_translation = joint_local_transforms[i]
+			transformed_translation = [
+				sum(transform_matrix[j][k] * original_translation[k] for k in range(3))
+				for j in range(3)
+			]
+			
+			# Check compatibility with transformed translation
+			for j in range(3):
+				translate_compatible &= not (translate[i][j] == False and abs(transformed_translation[j]) > 1e-6)
+		
+		return translate_compatible
+
+	def _analyze_tool_offsets(self, chains: List[Dict[str, Any]]) -> Dict[str, Any]:
+		"""
+		Analyze tool offsets in world frame for robot chains.
+		
+		This method identifies tool attachment points and calculates their offsets
+		from the end of the kinematic chain in world coordinates.
+		
+		Args:
+			chains: List of kinematic chains
+			
+		Returns:
+			Dictionary with tool analysis results
+		"""
+		tool_analysis = {
+			'has_tools': False,
+			'tool_count': 0,
+			'tools': [],
+			'primary_tool': None,
+			'tool_characteristics': []
+		}
+		
+		if not chains:
+			return tool_analysis
+		
+		# Analyze each chain for potential tool offsets
+		for chain in chains:
+			tool_info = self._analyze_chain_tool_offset(chain)
+			if tool_info['has_tool']:
+				tool_analysis['has_tools'] = True
+				tool_analysis['tool_count'] += 1
+				tool_analysis['tools'].append(tool_info)
+				
+				# Set primary tool (first one found, or longest chain)
+				if (tool_analysis['primary_tool'] is None or 
+					tool_info['chain_length'] > tool_analysis['primary_tool']['chain_length']):
+					tool_analysis['primary_tool'] = tool_info
+				
+				# Collect characteristics
+				tool_analysis['tool_characteristics'].extend(tool_info['characteristics'])
+		
+		# Remove duplicate characteristics
+		tool_analysis['tool_characteristics'] = list(set(tool_analysis['tool_characteristics']))
+		
+		return tool_analysis
+	
+	def _analyze_chain_tool_offset(self, chain: Dict[str, Any]) -> Dict[str, Any]:
+		"""
+		Analyze a single chain for tool offset information.
+		
+		Args:
+			chain: Kinematic chain dictionary
+			
+		Returns:
+			Dictionary with tool offset analysis for this chain
+		"""
+		tool_info = {
+			'has_tool': False,
+			'chain_id': chain.get('chain_id', 0),
+			'chain_length': chain.get('length', 0),
+			'tool_offset_world': {'position': [0.0, 0.0, 0.0], 'orientation': [0.0, 0.0, 0.0, 1.0]},
+			'tool_offset_local': {'position': [0.0, 0.0, 0.0], 'orientation': [0.0, 0.0, 0.0, 1.0]},
+			'tool_frame_name': None,
+			'end_effector_joint': None,
+			'characteristics': []
+		}
+		
+		# Get the chain's joints
+		joints = chain.get('joints', [])
+		if not joints:
+			return tool_info
+		
+		# Check for end-effector joints (these were pruned but contain tool info)
+		end_effector_joints = chain.get('end_effector_joints', [])
+		has_end_effector = chain.get('has_end_effector', False)
+		
+		# If we have end-effector joints, analyze them for tool offset
+		if has_end_effector and end_effector_joints:
+			tool_info['has_tool'] = True
+			tool_info['end_effector_joint'] = end_effector_joints[-1]  # Last pruned joint
+			tool_info['characteristics'].append('end_effector_mounted')
+			
+			# Find the actual joint object for the end effector
+			end_effector_joint = self._find_joint_by_name(end_effector_joints[-1])
+			if end_effector_joint:
+				tool_info['tool_frame_name'] = end_effector_joint.name
+				
+				# Get tool offset in world frame
+				world_transform = end_effector_joint.get_world_transform()
+				tool_info['tool_offset_world']['position'] = world_transform.translation
+				tool_info['tool_offset_world']['orientation'] = world_transform.euler_angles
+				
+				# Get tool offset in local frame (relative to parent)
+				local_transform = end_effector_joint.transform
+				tool_info['tool_offset_local']['position'] = local_transform.translation
+				tool_info['tool_offset_local']['orientation'] = local_transform.euler_angles
+				
+				# Analyze tool characteristics based on naming and structure
+				tool_info['characteristics'].extend(self._analyze_tool_characteristics(end_effector_joint))
+		
+		# If no end-effector joints, check if the last joint has tool-like characteristics
+		elif joints:
+			last_joint = joints[-1]
+			if self._has_tool_characteristics(last_joint):
+				tool_info['has_tool'] = True
+				tool_info['tool_frame_name'] = last_joint.name
+				tool_info['characteristics'].append('integrated_tool')
+				
+				# Get tool offset in world frame
+				world_transform = last_joint.get_world_transform()
+				tool_info['tool_offset_world']['position'] = world_transform.translation
+				tool_info['tool_offset_world']['orientation'] = world_transform.euler_angles
+				
+				# Get tool offset in local frame
+				local_transform = last_joint.transform
+				tool_info['tool_offset_local']['position'] = local_transform.translation
+				tool_info['tool_offset_local']['orientation'] = local_transform.euler_angles
+				
+				# Analyze tool characteristics
+				tool_info['characteristics'].extend(self._analyze_tool_characteristics(last_joint))
+		
+		return tool_info
+	
+	def _find_joint_by_name(self, joint_name: str) -> Optional[USDJoint]:
+		"""Find a joint by name in the robot structure."""
+		return self.robot.joints.get(joint_name)
+	
+	def _has_tool_characteristics(self, joint: USDJoint) -> bool:
+		"""Check if a joint has tool-like characteristics."""
+		joint_name_lower = joint.name.lower()
+		tool_keywords = [
+			'tool', 'tcp', 'tip', 'end_effector', 'ee', 'flange',
+			'mount', 'attachment', 'connector', 'tool_frame'
+		]
+		
+		return any(keyword in joint_name_lower for keyword in tool_keywords)
+	
+	def _analyze_tool_characteristics(self, joint: USDJoint) -> List[str]:
+		"""Analyze tool characteristics based on joint properties."""
+		characteristics = []
+		joint_name_lower = joint.name.lower()
+		
+		# Tool type detection based on naming
+		if 'tcp' in joint_name_lower or 'tool_center_point' in joint_name_lower:
+			characteristics.append('tool_center_point')
+		elif 'flange' in joint_name_lower:
+			characteristics.append('mounting_flange')
+		elif 'gripper' in joint_name_lower:
+			characteristics.append('gripper_mount')
+		elif 'welder' in joint_name_lower or 'welding' in joint_name_lower:
+			characteristics.append('welding_tool')
+		elif 'camera' in joint_name_lower:
+			characteristics.append('vision_system')
+		elif 'sensor' in joint_name_lower:
+			characteristics.append('sensor_mount')
+		
+		# Joint type characteristics
+		if joint.joint_type == 'fixed':
+			characteristics.append('fixed_mount')
+		elif joint.joint_type == 'revolute':
+			characteristics.append('rotational_tool')
+		elif joint.joint_type == 'prismatic':
+			characteristics.append('linear_tool')
+		
+		# Transform characteristics
+		local_transform = joint.transform
+		translation_magnitude = (local_transform.translation[0]**2 + 
+								local_transform.translation[1]**2 + 
+								local_transform.translation[2]**2)**0.5
+		
+		if translation_magnitude > 0.001:  # More than 1mm offset
+			characteristics.append('offset_tool')
+		else:
+			characteristics.append('centered_tool')
+		
+		return characteristics
