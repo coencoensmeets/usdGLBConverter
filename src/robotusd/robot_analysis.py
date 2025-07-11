@@ -180,6 +180,9 @@ class USDRobotAnalysis:
         # Determine chain type based on pruned joints
         chain_type = self._classify_chain_type(analysis_joints, joint_axes)
         
+        # All joints align
+        aligned_joints = self._validate_aligned_joints({'joints': analysis_joints})
+        
         # Detect grippers in the chain
         # Detect gripper configuration - for now, simplified detection on single chain
         gripper_info = {'has_gripper': False, 'gripper_type': 'none', 'gripper_dof': 0}
@@ -193,6 +196,7 @@ class USDRobotAnalysis:
             'joint_names': [j.name for j in analysis_joints],
             'joint_types': [j.joint_type for j in analysis_joints],
             'joint_axes': joint_axes,
+            'aligned_joints': aligned_joints,
             'axis_sequence': joint_axes,
             'total_reach': total_reach,
             'start_link': analysis_joints[0].parent_link.name if analysis_joints and analysis_joints[0].parent_link else 'unknown',
@@ -417,6 +421,44 @@ class USDRobotAnalysis:
         
         # For other robots, just take the longest chain
         return max(chains, key=lambda x: x['length'])
+    
+    def _validate_aligned_joints(self, chain: Dict[str, Any]) -> List[bool]:
+        """
+        Validates which joint frames in the chain have the same axis direction as the reference (first) joint.
+        
+        This function checks each joint in a kinematic chain to see if it has a parallel axis
+        to the reference joint (first joint), which is important for determining solver 
+        compatibility and configuration validity.
+        
+        Args:
+            chain: Dictionary containing chain information with 'joints' key
+            
+        Returns:
+            List[bool]: List of booleans, one for each joint, indicating if that joint's 
+                       axis is aligned with the reference joint's axis
+        """
+        if not chain or 'joints' not in chain:
+            return []
+        
+        joints = chain['joints']
+        if len(joints) == 0:
+            return []
+        
+        if len(joints) == 1:
+            return [True]  # Single joint is considered aligned with itself
+        
+        alignment_joints = []
+        from .math_utils import quaternion_to_rotation_matrix, normalize_vector
+        for joint in joints:
+            world_translate, world_quat = joint.get_world_pose()
+            world_quat = normalize_vector(world_quat)
+            print(f"({joint.name}) {world_quat}")
+            if np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6):
+                alignment_joints.append(True)
+            else:
+                alignment_joints.append(False)
+                
+        return alignment_joints
     
     def _analyze_dof_configuration(self, primary_chain: Optional[Dict[str, Any]], 
                                  all_chains: List[Dict[str, Any]]) -> Dict[str, Any]:

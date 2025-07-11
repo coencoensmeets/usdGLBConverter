@@ -61,8 +61,7 @@ class USDLink:
     @property
     def world_transform(self) -> HomogeneousMatrix:
         """Get the world transformation as HomogeneousMatrix object."""
-        if self._world_transform is None:
-            self._compute_world_transform()
+        self._compute_world_transform()
         return self._world_transform.copy()
     
     def _compute_world_transform(self) -> None:
@@ -73,11 +72,11 @@ class USDLink:
             logger.debug(f"Link {self.name} is base - using local transform as world transform")
         else:
             # Get parent's world transform and joint transform
-            parent_world_transform = self.parent_joint.get_world_transform()
-            joint_transform = self.parent_joint.transform_joint_to_child
+            world_to_joint = self.parent_joint.get_world_transform()
+            joint_to_link = self.parent_joint.transform_joint_to_child
             
-            # World transform = Parent_world * Joint_transform * Link_local
-            self._world_transform = parent_world_transform * joint_transform * self._local_transform
+            # World transform = Parent_world * joint_to_child * Link_local
+            self._world_transform = world_to_joint * joint_to_link
             
             logger.debug(f"Link {self.name} world transform computed from parent chain")
     
@@ -274,14 +273,6 @@ class USDLink:
         self._all_materials_cache = None
         self._material_summary_cache = None
 
-    def reset_world_transform(self) -> None:
-        """Reset world transform and propagate to children."""
-        self._world_transform = None
-        # Propagate to all child links
-        for joint in self.joints:
-            if joint.child_link:
-                joint.child_link.reset_world_transform()
-
 class USDJoint:
     """
     Represents a robot joint connecting two links.
@@ -338,16 +329,19 @@ class USDJoint:
     @property
     def transform_parent_to_joint(self) -> HomogeneousMatrix:
         """Get the transformation from parent link frame to joint frame."""
+        self.get_world_transform()
         return self._parent_to_joint.copy()
     
     @property
     def transform_joint_to_child(self) -> HomogeneousMatrix:
         """Get the transformation from joint frame to child link frame."""
+        self.get_world_transform()
         return self._joint_to_child.copy()
     
     @property
     def transform(self) -> HomogeneousMatrix:
         """Get the current joint transformation as HomogeneousMatrix object."""
+        self.get_world_transform()
         return self._parent_to_joint * self._joint_to_child
     
     @property
@@ -367,29 +361,23 @@ class USDJoint:
         """Get the world transformation matrix for this joint."""
         return self.get_world_transform().matrix
     
-    def get_world_transform(self) -> HomogeneousMatrix:
-        """Get the world transformation as HomogeneousMatrix object for the joint frame position."""
-        rot0, rot1 = self.get_local_rotations()
-        parent_to_joint = HomogeneousMatrix.from_pose(self.get_local_positions()[0], rot0)
-        if not self.parent_link:
-            return parent_to_joint.copy()
-        
-        return self.parent_link.world_transform * parent_to_joint.copy()
-    
     def get_world_pose(self) -> Tuple[List[float], List[float]]:
         """Get world pose as (translation, quaternion)."""
         return self.get_world_transform().pose
     
-    def align_to_world(self) -> None:
-        """Align the joint to the world coordinate system."""
-        
+    def get_world_transform(self) -> HomogeneousMatrix:
+        """Get the world transformation as HomogeneousMatrix object for the joint frame position."""
+        self._compute_joint_transform_matrices()
+        if not self.parent_link:
+            return self._parent_to_joint.copy()
         # Get the current world transform
-        self.parent_link.reset_world_transform()
-        old_world_to_joint = self.get_world_transform()
+        old_world_to_joint = self.parent_link.world_transform * self._parent_to_joint.copy()
         new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
 
         self._parent_to_joint = self._parent_to_joint * old_world_to_joint.inverse() * new_world_to_joint
         self._joint_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._joint_to_child
+        
+        return self.parent_link.world_transform * self._parent_to_joint
     
     def _determine_joint_type(self) -> str:
         """Determine the type of joint from the prim."""
@@ -452,9 +440,8 @@ class USDJoint:
             return None
         
         # Transform local axis to world coordinates using world transform matrix
-        rot0, rot1 = self.get_local_rotations()
-        parent_to_joint = HomogeneousMatrix.from_pose(self.get_local_positions()[0], rot0)
-        world_to_joint = self.parent_link.world_transform*parent_to_joint if self.parent_link else HomogeneousMatrix.identity()
+        self._compute_joint_transform_matrices()
+        world_to_joint = self.parent_link.world_transform * self._parent_to_joint
         world_axis = world_to_joint.transform_vector(local_axis)
         # Round to 3 decimals for the axis
         world_axis = [round(x, 3) for x in world_axis]
@@ -530,7 +517,6 @@ class USDJoint:
         if "Rotation" in self.config:
             additional_quaternion = euler_to_quat(-self.config['Rotation']['Roll'], -self.config['Rotation']['Pitch'], -self.config['Rotation']['Yaw'])
             local_rot1_list = quat_multiply(additional_quaternion, local_rot1_list)
-            print("Applying additional rotation to parent joint")
 
         if local_rot0_list and len(local_rot0_list) == 4:
             rot0 = [local_rot0_list[1], local_rot0_list[2], local_rot0_list[3], local_rot0_list[0]]  # w,x,y,z -> x,y,z,w
@@ -854,7 +840,7 @@ class USDRobot:
         for joint_prim, body0, body1 in joint_data:
             joint_name = joint_prim.GetName()
             config = None
-            if joint_name in self.config['Joints']:
+            if 'Joints' in self.config and joint_name in self.config['Joints']:
                 config = self.config['Joints'][joint_name]
                 logger.debug(f"Using config for joint {joint_name}: {config}")
             joint = USDJoint(joint_prim, config=config)
@@ -866,10 +852,6 @@ class USDRobot:
         
         # Now assign parent-child relationships based on tree structure
         self._assign_joint_relationships(tree_structure, joint_data)
-        
-        # After building all connections, compute world transformations correctly
-        self._compute_world_transformations()
-        self._align_to_world()
         
         logger.info(f"Successfully built {len(self.joints)} joint connections")
     
@@ -945,9 +927,6 @@ class USDRobot:
                 
                 # Add joint to parent link
                 parent_link.add_joint(joint)
-                
-                # Reset world transforms for the child link since its parent relationship changed
-                child_link.reset_world_transform()
                 
                 logger.debug(f"Connected joint {joint.name}: {parent_link.name} -> {child_link.name}")
         
@@ -1575,94 +1554,3 @@ class USDRobot:
         print(f"World pose - Translation: {translation}")
         print(f"World pose - Quaternion: {quaternion}")
         print("=== END LINK TRANSFORM DEBUG ===\n")
-    
-    def _compute_world_transformations(self) -> None:
-        """Compute world transformations for all links and joints after joint tree construction."""
-        logger.info("Computing world transformations for all links and joints...")
-        
-        # First, reset all world transform caches to ensure fresh computation
-        for link in self.links.values():
-            link._world_transform = None
-        
-        # If we have a base link, start computation from there
-        if self.base_link:
-            logger.debug(f"Starting world transform computation from base link: {self.base_link.name}")
-            self._compute_world_transforms_recursive(self.base_link)
-        else:
-            # If no base link, compute transforms for all root links
-            root_links = [link for link in self.links.values() if not link.parent_joint]
-            if root_links:
-                logger.debug(f"No base link found, computing transforms for {len(root_links)} root links")
-                for root_link in root_links:
-                    self._compute_world_transforms_recursive(root_link)
-            else:
-                logger.warning("No root links found - cannot compute world transforms")
-        
-        # Verify that all links have valid world transforms
-        invalid_links = []
-        valid_links = []
-        for link in self.links.values():
-            try:
-                world_transform = link.world_transform
-                if world_transform.is_valid():
-                    valid_links.append(link.name)
-                else:
-                    invalid_links.append(link.name)
-            except Exception as e:
-                logger.error(f"Error computing world transform for link {link.name}: {e}")
-                invalid_links.append(link.name)
-        
-        # Also verify joints
-        invalid_joints = []
-        valid_joints = []
-        for joint in self.joints.values():
-            try:
-                joint_world_transform = joint.get_world_transform()
-                if joint_world_transform.is_valid():
-                    valid_joints.append(joint.name)
-                else:
-                    invalid_joints.append(joint.name)
-            except Exception as e:
-                logger.error(f"Error computing world transform for joint {joint.name}: {e}")
-                invalid_joints.append(joint.name)
-        
-        # Report results
-        logger.info(f"World transform computation completed:")
-        logger.info(f"  - Valid link transforms: {len(valid_links)}")
-        logger.info(f"  - Invalid link transforms: {len(invalid_links)}")
-        logger.info(f"  - Valid joint transforms: {len(valid_joints)}")
-        logger.info(f"  - Invalid joint transforms: {len(invalid_joints)}")
-        
-        if invalid_links:
-            logger.warning(f"Links with invalid world transforms: {invalid_links}")
-        if invalid_joints:
-            logger.warning(f"Joints with invalid world transforms: {invalid_joints}")
-        
-        if not invalid_links and not invalid_joints:
-            logger.info("All world transformations computed successfully")
-    
-    def _compute_world_transforms_recursive(self, link: USDLink) -> None:
-        """Recursively compute world transforms for a link and all its children."""
-        try:
-            # Force computation of world transform for this link
-            world_transform = link.world_transform
-            logger.debug(f"Computed world transform for link: {link.name}")
-            
-            # Recursively compute for all child links
-            for joint in link.joints:
-                if joint.child_link:
-                    # Also compute world transform for the joint
-                    try:
-                        joint_world_transform = joint.get_world_transform()
-                        logger.debug(f"Computed world transform for joint: {joint.name}")
-                    except Exception as e:
-                        logger.error(f"Error computing world transform for joint {joint.name}: {e}")
-                    
-                    # Recurse to child link
-                    self._compute_world_transforms_recursive(joint.child_link)
-        except Exception as e:
-            logger.error(f"Error computing world transform for link {link.name}: {e}")
-            
-    def _align_to_world(self)->None:
-        for joint in self.joints.values():
-            joint.align_to_world()
