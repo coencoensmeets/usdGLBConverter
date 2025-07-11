@@ -3,6 +3,30 @@ from typing import List
 from pxr import Gf
 import numpy as np
 
+# Axis constants for cleaner code (only positive axes)
+AXIS_CONST = {
+    'X': [1.0, 0.0, 0.0],
+    'Y': [0.0, 1.0, 0.0],
+    'Z': [0.0, 0.0, 1.0],
+}
+
+def XYZList_to_string(xyz: List[float]) -> str:
+    """Convert a list of 3 floats to a string representation with axis detection (positive only).
+    Negative values are converted to positive values before matching.
+    """
+    tol = 1e-3
+    xyz_pos = [abs(v) for v in xyz]
+    for axis, vec in AXIS_CONST.items():
+        if np.allclose(xyz_pos, vec, atol=tol):
+            return axis
+    return f"[{xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}]"
+
+def string_to_XYZList(s: str) -> List[float]:
+    """Convert 'X', 'Y', 'Z' string to a list of floats (positive only)."""
+    s = s.strip().upper()
+    if s in AXIS_CONST:
+        return AXIS_CONST[s]
+
 def quaternion_multiply(q1: List[float], q2: List[float]) -> List[float]:
     """Multiply two quaternions (x, y, z, w format)."""
     x1, y1, z1, w1 = q1
