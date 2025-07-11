@@ -61,7 +61,8 @@ class USDLink:
     @property
     def world_transform(self) -> HomogeneousMatrix:
         """Get the world transformation as HomogeneousMatrix object."""
-        self._compute_world_transform()
+        if self._world_transform is None:
+            self._compute_world_transform()
         return self._world_transform.copy()
     
     def _compute_world_transform(self) -> None:
@@ -316,32 +317,36 @@ class USDJoint:
         # This represents the static offset plus any joint motion
         
         # T_parent_to_joint = Transform from parent link frame to joint frame (localPos0, localRot0)
-        self._parent_to_joint = HomogeneousMatrix.from_pose(local_pos0, local_rot0)
+        self._parent_to_joint_original = HomogeneousMatrix.from_pose(local_pos0, local_rot0)
         
         # T_joint_to_child = Transform from joint frame to child link frame (inverse of localPos1, localRot1)
         # We need the inverse because localPos1/localRot1 describe how to get FROM child TO joint
         child_to_joint = HomogeneousMatrix.from_pose(local_pos1, local_rot1)
-        self._joint_to_child = child_to_joint.inverse()
+        self._joint_to_child_original = child_to_joint.inverse()
         
         # Store the combined static transform (without joint motion)
-        self._static_transform = self._parent_to_joint * self._joint_to_child
+        self._static_transform = self._parent_to_joint_original * self._joint_to_child_original
     
     @property
     def transform_parent_to_joint(self) -> HomogeneousMatrix:
         """Get the transformation from parent link frame to joint frame."""
-        self.get_world_transform()
+        if not self._parent_to_joint:
+            self._parent_to_joint = self._parent_to_joint_original.copy()
         return self._parent_to_joint.copy()
     
     @property
     def transform_joint_to_child(self) -> HomogeneousMatrix:
         """Get the transformation from joint frame to child link frame."""
-        self.get_world_transform()
+        if not self._joint_to_child:
+            self._joint_to_child = self._joint_to_child_original.copy()
         return self._joint_to_child.copy()
     
     @property
     def transform(self) -> HomogeneousMatrix:
         """Get the current joint transformation as HomogeneousMatrix object."""
-        self.get_world_transform()
+        if not self._parent_to_joint or not self._joint_to_child:
+            self._parent_to_joint = self._parent_to_joint_original.copy()
+            self._joint_to_child = self._joint_to_child_original.copy()
         return self._parent_to_joint * self._joint_to_child
     
     @property
@@ -359,25 +364,29 @@ class USDJoint:
     
     def get_world_transform_matrix(self) -> np.ndarray:
         """Get the world transformation matrix for this joint."""
-        return self.get_world_transform().matrix
+        if self.world_to_joint:
+            return self.get_world_transform().matrix
+        return self.world_to_joint.matrix
     
     def get_world_pose(self) -> Tuple[List[float], List[float]]:
         """Get world pose as (translation, quaternion)."""
-        return self.get_world_transform().pose
+        if self.world_to_joint:
+            return self.get_world_transform().pose
+        return self.world_to_joint.pose
     
     def get_world_transform(self) -> HomogeneousMatrix:
         """Get the world transformation as HomogeneousMatrix object for the joint frame position."""
-        self._compute_joint_transform_matrices()
         if not self.parent_link:
-            return self._parent_to_joint.copy()
+            return self._parent_to_joint_original.copy()
         # Get the current world transform
-        old_world_to_joint = self.parent_link.world_transform * self._parent_to_joint.copy()
+        old_world_to_joint = self.parent_link.world_transform * self._parent_to_joint_original.copy()
         new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
 
-        self._parent_to_joint = self._parent_to_joint * old_world_to_joint.inverse() * new_world_to_joint
-        self._joint_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._joint_to_child
+        self._parent_to_joint = self._parent_to_joint_original * old_world_to_joint.inverse() * new_world_to_joint
+        self._joint_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._joint_to_child_original
         
-        return self.parent_link.world_transform * self._parent_to_joint
+        self.world_to_joint = self.parent_link.world_transform * self._parent_to_joint
+        return self.world_to_joint
     
     def _determine_joint_type(self) -> str:
         """Determine the type of joint from the prim."""
@@ -440,8 +449,7 @@ class USDJoint:
             return None
         
         # Transform local axis to world coordinates using world transform matrix
-        self._compute_joint_transform_matrices()
-        world_to_joint = self.parent_link.world_transform * self._parent_to_joint
+        world_to_joint = self.parent_link.world_transform * self._parent_to_joint_original
         world_axis = world_to_joint.transform_vector(local_axis)
         # Round to 3 decimals for the axis
         world_axis = [round(x, 3) for x in world_axis]

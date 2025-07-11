@@ -452,7 +452,6 @@ class USDRobotAnalysis:
         for joint in joints:
             world_translate, world_quat = joint.get_world_pose()
             world_quat = normalize_vector(world_quat)
-            print(f"({joint.name}) {world_quat}")
             if np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6):
                 alignment_joints.append(True)
             else:
