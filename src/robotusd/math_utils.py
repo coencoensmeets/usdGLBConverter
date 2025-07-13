@@ -56,6 +56,14 @@ def euler_to_quat(x: float, y: float, z: float) -> List[float]:
     qz = cx*cy*sz + sx*sy*cz
     return [qx, qy, qz, qw]
 
+def quat_to_euler(q: List[float]) -> List[float]:
+    """Convert quaternion (x, y, z, w) to Euler angles (Roll, Pitch, Yaw)."""
+    x, y, z, w = q
+    roll = math.atan2(2*(y*z + x*w), 1 - 2*(y*y + z*z))
+    pitch = math.asin(2*(x*z - y*w))
+    yaw = math.atan2(2*(x*y + z*w), 1 - 2*(x*x + y*y))
+    return [math.degrees(roll), math.degrees(pitch), math.degrees(yaw)]
+
 def quat_to_list(q: Gf.Quatf) -> List[float]:
     """
     Convert a usd-core quaternion (with .real and .imaginary attributes) to [w, x, y, z] list.

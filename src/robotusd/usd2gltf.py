@@ -4,7 +4,7 @@ import logging
 from pxr import UsdGeom, UsdShade, Gf
 import numpy as np
 from .robot_structure import USDRobot, USDLink, USDMesh
-from .math_utils import HomogeneousMatrix, quat_to_list, quaternion_multiply, quaternion_inverse, rotate_vector
+from .math_utils import HomogeneousMatrix, quat_to_list, quaternion_multiply, quaternion_inverse, rotate_vector,quat_to_euler
 from typing import List, Tuple, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -90,23 +90,19 @@ class USDToGLTFConverter:
 
         if link.parent_joint:
             # Use the joint's transform property for the link's transform relative to the joint frame
-            local_matrix = link.parent_joint.transform_joint_to_child
+            local_matrix = link.transform_parent_to_link
             translation, quaternion = self._extract_pose_from_matrix(local_matrix)
-            if translation != [0.0, 0.0, 0.0]:
-                node_dict["translation"] = translation
-            if quaternion != [0.0, 0.0, 0.0, 1.0]:
-                node_dict["rotation"] = quaternion
+            node_dict["translation"] = translation
+            node_dict["rotation"] = quaternion
             logger.debug(f"glTF link node for {link.name} (child of joint {link.parent_joint.name}):")
             logger.debug(f"  Final translation: {translation}")
             logger.debug(f"  Final quaternion: {quaternion}")
         else:
             # Base link - use its local transform (relative to world origin)
-            local_matrix = HomogeneousMatrix(link.local_transform_matrix)
+            local_matrix = link.local_transform
             translation, quaternion = self._extract_pose_from_matrix(local_matrix)
-            if translation != [0.0, 0.0, 0.0]:
-                node_dict["translation"] = translation
-            if quaternion != [0.0, 0.0, 0.0, 1.0]:
-                node_dict["rotation"] = quaternion
+            node_dict["translation"] = translation
+            node_dict["rotation"] = quaternion
             logger.debug(f"glTF base link node for {link.name}: translation={translation}, rotation={quaternion}")
         return node_dict
     
@@ -116,7 +112,7 @@ class USDToGLTFConverter:
         frame_node = {"name": f"{joint.name}_frame"}
 
         # Use the joint's transform_parent_to_joint property for the frame node
-        joint_frame_matrix = joint.transform_parent_to_joint
+        joint_frame_matrix = joint.transform_parent_to_self
         translation, quaternion = self._extract_pose_from_matrix(joint_frame_matrix)
         if translation != [0.0, 0.0, 0.0]:
             frame_node["translation"] = translation
@@ -161,36 +157,123 @@ class USDToGLTFConverter:
         if usd_mesh.has_multiple_materials():
             logger.debug(f"Mesh has multiple materials: {usd_mesh.get_all_material_names()}")
 
-        # Get cached transform or calculate it
-        mesh_path = str(usd_mesh.mesh_prim.GetPath())
-        if mesh_path not in self._transform_cache:
-            xform = UsdGeom.Xformable(usd_mesh.mesh_prim)
-            local_transformation: Gf.Matrix4d = xform.GetLocalTransformation()
-            translation: Gf.Vec3d = local_transformation.ExtractTranslation()
-            rotation: Gf.Rotation = local_transformation.ExtractRotation()
-            scale: Gf.Vec3d = Gf.Vec3d(*(v.GetLength() for v in local_transformation.ExtractRotationMatrix()))
-            self._transform_cache[mesh_path] = (translation, rotation, scale)
-        
-        translation, rotation, scale = self._transform_cache[mesh_path]
+        # Get the 4x4 transformation matrix from the link
+        if self.robot.get_object_from_primName(link.prim.GetName()) is None:
+            logger.warning(f"Link '{link.name}' not found in robot structure - Using no additional transformation")
+            translation = [0.0, 0.0, 0.0]
+            quaternion = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion (x, y, z, w)
+            scale = [1.0, 1.0, 1.0]
+        else:
+            transform_world_to_parent = self.robot.get_object_from_primName(link.prim.GetParent().GetName()).transform_world_to_self
+            transform_parent_to_mesh = link.local_transform
+            transform_world_to_link = link.transform_world_to_self
+            transform_link_to_mesh = transform_world_to_link.inverse() * transform_world_to_parent * transform_parent_to_mesh
+            translation, quaternion = transform_link_to_mesh.pose
+            if hasattr(link.scale, '__len__') and len(link.scale) == 3:
+                scale = [float(link.scale[0]), float(link.scale[1]), float(link.scale[2])]
+            else:
+                scale = [1.0, 1.0, 1.0]  # Default scale
+                
+        translation = [0,0,0]
+        quaternion = [0,0,0,1]  # Default to identity if no link transform
+        scale = [1.0, 1.0, 1.0]  # Default scale if no link transform
 
+        # Get mesh local transformation
+        xform = UsdGeom.Xformable(usd_mesh.mesh_prim)
+        local_transformation = xform.GetLocalTransformation()
+        mesh_translation = local_transformation.ExtractTranslation()
+        mesh_rotation = local_transformation.ExtractRotation()
+        mesh_scale_matrix = local_transformation.ExtractRotationMatrix()
+        mesh_scale = [mesh_scale_matrix[0].GetLength(), mesh_scale_matrix[1].GetLength(), mesh_scale_matrix[2].GetLength()]
+        
+        # Convert mesh transformation to lists
+        mesh_translation = [float(mesh_translation[0]), float(mesh_translation[1]), float(mesh_translation[2])]
+        quat = mesh_rotation.GetQuat()
+        mesh_quaternion = [float(quat.GetImaginary()[0]), float(quat.GetImaginary()[1]), float(quat.GetImaginary()[2]), float(quat.GetReal())]  # [x, y, z, w]
+        mesh_scale = [float(s) for s in mesh_scale]
+        
+        # mesh_translation = [0,0,0]
+        # mesh_quaternion = [0,0,0,1]  # Default to identity if no mesh transform
+        # mesh_scale = [1.0, 1.0, 1.0]  # Default scale if no mesh transform
+            
         # Optimize point transformation using numpy
         points_array = np.array([(p[0], p[1], p[2]) for p in points], dtype=np.float32)
         
-        # Apply scale
-        if scale != Gf.Vec3d(1.0, 1.0, 1.0):
-            scale_array = np.array([scale[0], scale[1], scale[2]], dtype=np.float32)
-            points_array *= scale_array
+        # Combine all transformations first
+        # Combine scales (multiply)
+        final_scale = np.array(mesh_scale, dtype=np.float32) * np.array(scale, dtype=np.float32)
         
-        # Apply rotation if not identity
-        if rotation.GetQuat() != Gf.Quatd(1.0, 0.0, 0.0, 0.0):
-            rot_matrix = np.array(Gf.Matrix3d(rotation.GetQuat()), dtype=np.float32)
-            points_array = np.dot(points_array, rot_matrix.T)
+        # Combine rotations (quaternion multiplication: link * mesh)
+        # First normalize quaternions to ensure they're unit quaternions
+        mesh_quat_norm = np.linalg.norm(mesh_quaternion)
+        link_quat_norm = np.linalg.norm(quaternion)
         
-        # Apply translation
-        if translation != Gf.Vec3d(0.0, 0.0, 0.0):
-            translation_array = np.array([translation[0], translation[1], translation[2]], dtype=np.float32)
-            points_array += translation_array
+        if mesh_quat_norm > 0:
+            mesh_q = np.array(mesh_quaternion, dtype=np.float32) / mesh_quat_norm
+        else:
+            mesh_q = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            
+        if link_quat_norm > 0:
+            link_q = np.array(quaternion, dtype=np.float32) / link_quat_norm
+        else:
+            link_q = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         
+        # Quaternion multiplication: q1 * q2 (link * mesh)
+        x1, y1, z1, w1 = link_q
+        x2, y2, z2, w2 = mesh_q
+        final_quaternion = np.array([
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,  # x
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,  # y
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,  # z
+            w1*w2 - x1*x2 - y1*y2 - z1*z2   # w
+        ], dtype=np.float32)
+        
+        # Combine translations (apply mesh translation first, then transform by link rotation, then add link translation)
+        mesh_trans = np.array(mesh_translation, dtype=np.float32)
+        link_trans = np.array(translation, dtype=np.float32)
+        
+        # Rotate mesh translation by link rotation
+        if not np.allclose(link_q, [0.0, 0.0, 0.0, 1.0]):
+            x, y, z, w = link_q
+            xx, yy, zz = x*x, y*y, z*z
+            xy, xz, yz = x*y, x*z, y*z
+            wx, wy, wz = w*x, w*y, w*z
+            
+            link_rot_matrix = np.array([
+                [1 - 2*(yy + zz),     2*(xy - wz),     2*(xz + wy)],
+                [    2*(xy + wz), 1 - 2*(xx + zz),     2*(yz - wx)],
+                [    2*(xz - wy),     2*(yz + wx), 1 - 2*(xx + yy)]
+            ], dtype=np.float32)
+            
+            rotated_mesh_trans = np.dot(mesh_trans, link_rot_matrix.T)
+        else:
+            rotated_mesh_trans = mesh_trans
+            
+        final_translation = rotated_mesh_trans + link_trans
+        
+        # Apply combined transformations
+        # Apply final scale
+        if not np.allclose(final_scale, [1.0, 1.0, 1.0]):
+            points_array *= final_scale
+        
+        # Apply final rotation
+        if not np.allclose(final_quaternion, [0.0, 0.0, 0.0, 1.0]):
+            x, y, z, w = final_quaternion
+            xx, yy, zz = x*x, y*y, z*z
+            xy, xz, yz = x*y, x*z, y*z
+            wx, wy, wz = w*x, w*y, w*z
+
+            final_rot_matrix = np.array([
+                [1 - 2*(yy + zz),     2*(xy - wz),     2*(xz + wy)],
+                [    2*(xy + wz), 1 - 2*(xx + zz),     2*(yz - wx)],
+                [    2*(xz - wy),     2*(yz + wx), 1 - 2*(xx + yy)]
+            ], dtype=np.float32)
+            points_array = np.dot(points_array, final_rot_matrix.T)
+        
+        # Apply final translation
+        if not np.allclose(final_translation, [0.0, 0.0, 0.0]):
+            points_array += final_translation
+
         # Convert to list for glTF
         vertices = points_array.flatten().tolist()
         

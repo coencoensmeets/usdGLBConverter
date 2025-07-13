@@ -454,9 +454,6 @@ class USDRobotAnalysis:
 				'confidence': 0.0,
 				'classification_reasoning': ['No kinematic chains found']
 			}
-   
-		print(chains)
-		
 		# Count different chain types
 		chain_types = [chain['chain_type'] for chain in chains]
 		chain_lengths = [chain['length'] for chain in chains]

@@ -120,27 +120,42 @@ def get_joint_tree(prim):
     
     def collect_joints(current_prim):
         if 'joint' in current_prim.GetTypeName().lower():
-            # print(f"Found joint: {current_prim}")
-            # print(f"  Name: {current_prim.GetName()}")
-            # print(f"  Path: {current_prim.GetPath()}")
-            # print(f"  Type: {current_prim.GetTypeName()}")
-            # print(f"  Properties: {[prop.GetName() for prop in current_prim.GetProperties()]}")
+            print(f"Found joint: {current_prim.GetName()}")
+            print(f"  Path: {current_prim.GetPath()}")
+            print(f"  Type: {current_prim.GetTypeName()}")
+            
+            # Check properties
+            print(f"  Properties:")
             for prop_name in ['physics:localPos0', 'physics:localPos1', 'physics:localRot0', 'physics:localRot1']:
                 attr = current_prim.GetAttribute(prop_name)
+                if attr.IsValid():
+                    try:
+                        value = attr.Get()
+                        print(f"    {prop_name}: {value}")
+                    except:
+                        print(f"    {prop_name}: Error reading value")
+                else:
+                    print(f"    {prop_name}: Not found")
+            
+            # Check relationships
             body0 = body1 = None
             for rel in current_prim.GetRelationships():
                 if rel.GetName() == "physics:body0":
                     targets = rel.GetTargets()
                     if targets:
                         body0 = current_prim.GetStage().GetPrimAtPath(str(targets[0]))
+                        print(f"    body0: {body0.GetName() if body0 else 'Not found'}")
                 if rel.GetName() == "physics:body1":
                     targets = rel.GetTargets()
                     if targets:
                         body1 = current_prim.GetStage().GetPrimAtPath(str(targets[0]))
+                        print(f"    body1: {body1.GetName() if body1 else 'Not found'}")
+            
             if body0 and body1:
                 all_bodies.add(body0)
                 all_bodies.add(body1)
                 joints.append((current_prim, body0, body1))
+            print()
         
         for child in current_prim.GetChildren():
             collect_joints(child)
@@ -225,9 +240,11 @@ def get_prim_position(prim):
 
 if __name__ == "__main__":
     # Open the USD stage
-    # stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
-    # stage = Usd.Stage.Open("Assets/Robots/BostonDynamics/spot/spot.usd")
+    # usd_file_path = "Assets/Robots/Franka/franka.usd"
+    # usd_file_path = "Assets/Robots/BostonDynamics/spot/spot.usd"
     usd_file_path = "Assets/Robots/UniversalRobots/ur3/ur3.usd"
+    
+    stage  = Usd.Stage.Open(usd_file_path)
 
     # Get the root prim
     root = stage.GetDefaultPrim()
@@ -269,4 +286,33 @@ if __name__ == "__main__":
         print("\nAll Joints Found:")
         for joint in all_joints:
             print(f"  - {joint.GetName()} (Type: {joint.GetTypeName()})")
+            for prop in joint.GetProperties():
+                try:
+                    value = prop.Get()
+                    if value is not None:
+                        print(f"      {prop.GetName()} : {value}")
+                    else:
+                        print(f"      {prop.GetName()} : None")
+                except Exception as e:
+                    print(f"      {prop.GetName()} : Error reading value - {e}")
+            
+            # Also check relationships
+            print(f"    Relationships:")
+            for rel in joint.GetRelationships():
+                try:
+                    targets = rel.GetTargets()
+                    if targets:
+                        target_names = []
+                        for target in targets:
+                            target_prim = joint.GetStage().GetPrimAtPath(target)
+                            if target_prim:
+                                target_names.append(target_prim.GetName())
+                            else:
+                                target_names.append(str(target))
+                        print(f"      {rel.GetName()} : {target_names}")
+                    else:
+                        print(f"      {rel.GetName()} : No targets")
+                except Exception as e:
+                    print(f"      {rel.GetName()} : Error reading targets - {e}")
+            print()
 
