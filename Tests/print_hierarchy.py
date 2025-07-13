@@ -225,8 +225,9 @@ def get_prim_position(prim):
 
 if __name__ == "__main__":
     # Open the USD stage
-    stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
+    # stage = Usd.Stage.Open("Assets/Robots/Franka/franka.usd")
     # stage = Usd.Stage.Open("Assets/Robots/BostonDynamics/spot/spot.usd")
+    usd_file_path = "Assets/Robots/UniversalRobots/ur3/ur3.usd"
 
     # Get the root prim
     root = stage.GetDefaultPrim()
