@@ -48,10 +48,13 @@ class USDLink:
 		
 		# World transformation matrix (will be computed on first access)
 		self._world_transform: Optional[HomogeneousMatrix] = None
+		self._world_transform_original: Optional[HomogeneousMatrix] = None
+		self._local_transform_aligned: Optional[HomogeneousMatrix] = None
 		
 		self.meshes: List['USDMesh'] = []
 		self.joints: List['USDJoint'] = []
 		self.parent_joint: Optional['USDJoint'] = None
+		self.properties: Dict[str, Any] = self._extract_link_properties()
 		
 		# Cache for expensive operations
 		self._all_child_links_cache: Optional[List['USDLink']] = None
@@ -260,6 +263,19 @@ class USDLink:
 				continue
 		logger.debug(f"  No transform prim found for {body_name}")
 		return None
+
+	def _extract_link_properties(self) -> Dict[str, Any]:
+		"""Extract all joint properties from the joint prim."""
+		properties = {}
+		for prop in self.prim.GetProperties():
+			prop_name = prop.GetName()
+			try:
+				prop_value = prop.Get()
+				properties[prop_name] = prop_value
+			except:
+				# Some properties might not have values
+				properties[prop_name] = None
+		return properties
 
 	def __str__(self) -> str:
 		return f"USDLink({self.name})"

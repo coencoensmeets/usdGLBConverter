@@ -35,14 +35,42 @@ __license__ = "MIT"
 # Import main classes for easy access
 from .robot_structure import USDRobot, USDLink, USDJoint, USDMesh
 from .usd2gltf import USDToGLTFConverter
-from .usdDHparameters import USDDHParameters
 from .robot_analysis import USDRobotAnalysis
 from .math_utils import (
+    # Core transformation class
+    HomogeneousMatrix,
+    
+    # Quaternion operations
     quat_to_list,
     quaternion_multiply,
     quaternion_inverse,
+    quat_multiply,
     euler_to_quat,
-    rotate_vector
+    quat_to_euler,
+    
+    # Vector operations
+    rotate_vector,
+    normalize_vector,
+    cross_product,
+    dot_product,
+    vector_angle,
+    
+    # Transformation utilities
+    quaternion_to_rotation_matrix,
+    axis_to_quat,
+    XYZList_to_string,
+    string_to_XYZList,
+    
+    # Backward compatibility functions
+    translation_to_homogeneous_matrix,
+    quaternion_to_homogeneous_matrix,
+    pose_to_homogeneous_matrix,
+    homogeneous_matrix_to_pose,
+    multiply_homogeneous_matrices,
+    inverse_homogeneous_matrix,
+    transform_point,
+    transform_vector,
+    rotation_matrix_to_quaternion
 )
 from .usd_utils import get_prim_from_name, get_all_joints, print_data_prim
 
@@ -54,15 +82,42 @@ __all__ = [
     "USDJoint",
     "USDMesh",
     "USDToGLTFConverter",
-    "USDDHParameters",
     "USDRobotAnalysis",
     
-    # Utility functions
+    # Core transformation class
+    "HomogeneousMatrix",
+    
+    # Quaternion operations
     "quat_to_list",
     "quaternion_multiply", 
     "quaternion_inverse",
+    "quat_multiply",
     "euler_to_quat",
+    "quat_to_euler",
+    
+    # Vector operations
     "rotate_vector",
+    "normalize_vector",
+    "cross_product",
+    "dot_product",
+    "vector_angle",
+    
+    # Transformation utilities
+    "quaternion_to_rotation_matrix",
+    "axis_to_quat",
+    "XYZList_to_string",
+    "string_to_XYZList",
+    
+    # Backward compatibility functions
+    "translation_to_homogeneous_matrix",
+    "quaternion_to_homogeneous_matrix",
+    "pose_to_homogeneous_matrix",
+    "homogeneous_matrix_to_pose",
+    "multiply_homogeneous_matrices",
+    "inverse_homogeneous_matrix",
+    "transform_point",
+    "transform_vector",
+    "rotation_matrix_to_quaternion",
     
     # USD utility functions
     "get_prim_from_name",
