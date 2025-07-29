@@ -257,7 +257,7 @@ class BaseRobotAnalysis:
 		alignment_joints = []
 		from .math_utils import quaternion_to_rotation_matrix, normalize_vector
 		for joint in joints:
-			world_translate, world_quat = joint.get_world_pose()
+			world_translate, world_quat = joint.transform_world_to_self.pose
 			world_quat = normalize_vector(world_quat)
 			if np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6):
 				alignment_joints.append(True)
@@ -1073,7 +1073,7 @@ class RobotArmAnalysis(BaseRobotAnalysis):
 				tool_info['tool_frame_name'] = end_effector_joint.name
 				
 				# Get tool offset in world frame
-				world_transform = end_effector_joint.get_world_transform()
+				world_transform = end_effector_joint.transform_world_to_self
 				tool_info['tool_offset_world']['position'] = world_transform.translation
 				tool_info['tool_offset_world']['orientation'] = world_transform.euler_angles
 				
@@ -1094,7 +1094,7 @@ class RobotArmAnalysis(BaseRobotAnalysis):
 				tool_info['characteristics'].append('integrated_tool')
 				
 				# Get tool offset in world frame
-				world_transform = last_joint.get_world_transform()
+				world_transform = last_joint.transform_world_to_self
 				tool_info['tool_offset_world']['position'] = world_transform.translation
 				tool_info['tool_offset_world']['orientation'] = world_transform.euler_angles
 				

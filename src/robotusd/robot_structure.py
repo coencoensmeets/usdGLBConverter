@@ -3,6 +3,7 @@ import struct
 import logging
 from pxr import Usd, UsdGeom, UsdShade, Gf
 import math
+import copy
 import numpy as np
 from .math_utils import (
 	quat_to_list, euler_to_quat, HomogeneousMatrix, quat_multiply,string_to_XYZList
@@ -11,6 +12,92 @@ from typing import List, Tuple, Optional, Dict, Any, Union, Set
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
+
+class USDFrame:
+	"""Base class for all USD frames (links, joints, etc.)."""
+	def __init__(self, prim: Any,  parent: Optional[Union['USDLink', 'USDJoint']] = None, children: Optional[Union['USDLink', 'USDJoint']] = None, name: str = None) -> None:
+		self.prim: Any = prim
+		self.name: str = name or prim.GetName()
+		
+		self.parent: Optional[Union['USDLink', 'USDJoint']] = None
+		self.children: List[Union['USDLink', 'USDJoint']] = []
+		self.properties: Dict[str, Any] = self._extract_properties()
+  
+		self._static_transform: Optional[HomogeneousMatrix] = None
+		self._parent_to_self: Optional[HomogeneousMatrix] = None
+		self._self_to_child: Optional[HomogeneousMatrix] = None
+		self._world_to_self: Optional[HomogeneousMatrix] = None
+		self._parent_to_self_original: Optional[HomogeneousMatrix] = None
+		self._self_to_child_original: Optional[HomogeneousMatrix] = None
+  
+	@property
+	def transform_parent_to_self(self) -> HomogeneousMatrix:
+		"""Get the transformation from parent link frame to joint frame."""
+		if not self._parent_to_self:
+			self._parent_to_self = self._parent_to_self_original.copy()
+		return self._parent_to_self.copy()
+	
+	@property
+	def transform_self_to_child(self) -> HomogeneousMatrix:
+		"""Get the transformation from joint frame to child link frame."""
+		if not self._self_to_child:
+			self._self_to_child = self._self_to_child_original.copy()
+		return self._self_to_child.copy()
+
+	@property
+	def transform_world_to_self(self) -> HomogeneousMatrix:
+		"""Get the world to joint transformation matrix."""
+		if not self._world_to_self:
+			self.__calculate_world_transform()
+		return self._world_to_self.copy()
+	
+	@property
+	def transform(self) -> HomogeneousMatrix:
+		"""Get the current joint transformation as HomogeneousMatrix object."""
+		if not self._parent_to_self or not self._self_to_child:
+			self._parent_to_self = self._parent_to_self_original.copy()
+			self._self_to_child = self._self_to_child_original.copy()
+		return self._parent_to_self * self._self_to_child
+
+	def __calculate_world_transform(self)->None:
+		"""Get the world transformation as HomogeneousMatrix object for the joint frame position."""
+		if not self.parent_link:
+			return self._parent_to_self_original.copy()
+		# Get the current world transform
+		old_world_to_joint = self.parent_link.transform_world_to_self * self._parent_to_self_original.copy()
+		new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
+
+		self._parent_to_self = self._parent_to_self_original * old_world_to_joint.inverse() * new_world_to_joint
+		self._self_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._self_to_child_original
+		
+		self._world_to_self = self.parent_link.transform_world_to_self * self._parent_to_self
+  
+		return self._world_to_self
+  
+	def _extract_properties(self) -> Dict[str, Any]:
+		"""Extract all joint properties from the joint prim."""
+		properties = {}
+		for prop in self.prim.GetProperties():
+			prop_name = prop.GetName()
+			try:
+				prop_value = prop.Get()
+				properties[prop_name] = prop_value
+			except:
+				# Some properties might not have values
+				properties[prop_name] = None
+		return properties
+	
+	def get_property(self, property_name: str) -> Any:
+		"""Get a specific joint property by name."""
+		return self.properties.get(property_name)
+	
+	def has_property(self, property_name: str) -> bool:
+		"""Check if joint has a specific property."""
+		return property_name in self.properties
+
+	def get_all_properties(self)-> Dict[str, Any]:
+		"""Get all properties of this frame."""
+		return copy.deepcopy(self.properties)
 
 class USDRoot:
 	"""Base class for root prim in USD hierarchy."""
@@ -88,10 +175,10 @@ class USDLink:
 			logger.debug(f"Link {self.name} is base - using local transform as world transform")
 		else:
 			# Get parent's world transform and joint transform
-			world_to_self = self.parent_joint.get_world_transform()
+			world_to_parent = self.parent_joint.transform_world_to_self
 			
 			# World transform = Parent_world * joint_to_child * Link_local
-			self._world_transform = world_to_self * self.transform_parent_to_link
+			self._world_transform = world_to_parent * self.transform_parent_to_link
 			
 			logger.debug(f"Link {self.name} world transform computed from parent chain")
 	
@@ -301,27 +388,17 @@ class USDLink:
 		self._all_materials_cache = None
 		self._material_summary_cache = None
 
-class USDJoint:
+class USDJoint(USDFrame):
 	"""
 	Represents a robot joint connecting two links.
 	Uses homogeneous transformation matrices for all pose calculations.
 	"""
 	def __init__(self, joint_prim: Any, parent_link: USDLink = None, child_link: USDLink = None, config: Optional[Dict[str, Any]] = None) -> None:
-		self.prim: Any = joint_prim
-		self.name: str = joint_prim.GetName()
-		self.parent_link: Optional[USDLink] = parent_link
-		self.child_link: Optional[USDLink] = child_link
+		super().__init__(joint_prim, parent=parent_link, children=[child_link] if child_link else None, name=joint_prim.GetName())
+
 		self.joint_type: str = self._determine_joint_type()
-		self.properties: Dict[str, Any] = self._extract_joint_properties()
 		
 		self.config: Dict[str, Any] = config if config else {}
-  
-		self._parent_to_self: Optional[HomogeneousMatrix] = None
-		self._self_to_child: Optional[HomogeneousMatrix] = None
-		self.world_to_self: Optional[HomogeneousMatrix] = None
-		self._static_transform: Optional[HomogeneousMatrix] = None
-		self._parent_to_self_original: Optional[HomogeneousMatrix] = None
-		self._self_to_child_original: Optional[HomogeneousMatrix] = None
 		
 		# Extract joint transform from local positions and rotations
 		self._joint_value = 0.0  # Current joint value (angle or displacement)
@@ -363,35 +440,6 @@ class USDJoint:
 		self._static_transform = self._parent_to_self_original * self._self_to_child_original
 	
 	@property
-	def transform_parent_to_self(self) -> HomogeneousMatrix:
-		"""Get the transformation from parent link frame to joint frame."""
-		if not self._parent_to_self:
-			self._parent_to_self = self._parent_to_self_original.copy()
-		return self._parent_to_self.copy()
-	
-	@property
-	def transform_self_to_child(self) -> HomogeneousMatrix:
-		"""Get the transformation from joint frame to child link frame."""
-		if not self._self_to_child:
-			self._self_to_child = self._self_to_child_original.copy()
-		return self._self_to_child.copy()
-
-	@property
-	def transform_world_to_self(self) -> HomogeneousMatrix:
-		"""Get the world to joint transformation matrix."""
-		if not self.world_to_self:
-			self.world_to_self = self.get_world_transform()
-		return self.world_to_self.copy()
-	
-	@property
-	def transform(self) -> HomogeneousMatrix:
-		"""Get the current joint transformation as HomogeneousMatrix object."""
-		if not self._parent_to_self or not self._self_to_child:
-			self._parent_to_self = self._parent_to_self_original.copy()
-			self._self_to_child = self._self_to_child_original.copy()
-		return self._parent_to_self * self._self_to_child
-	
-	@property
 	def joint_value(self) -> float:
 		"""Get the current joint value (angle for revolute, displacement for prismatic)."""
 		return self._joint_value
@@ -403,33 +451,6 @@ class USDJoint:
 		# Reset world transforms of child links since joint value changed
 		if self.child_link:
 			self.child_link.reset_world_transform()
-	
-	def get_world_transform_matrix(self) -> np.ndarray:
-		"""Get the world transformation matrix for this joint."""
-		if not self.world_to_self:
-			return self.get_world_transform().matrix
-		return self.world_to_self.matrix
-	
-	def get_world_pose(self) -> Tuple[List[float], List[float]]:
-		"""Get world pose as (translation, quaternion)."""
-		if not self.world_to_self:
-			return self.get_world_transform().pose
-		return self.world_to_self.pose
-	
-	def get_world_transform(self) -> HomogeneousMatrix:
-		"""Get the world transformation as HomogeneousMatrix object for the joint frame position."""
-		if not self.parent_link:
-			return self._parent_to_self_original.copy()
-		# Get the current world transform
-		old_world_to_joint = self.parent_link.transform_world_to_self * self._parent_to_self_original.copy()
-		new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
-
-		self._parent_to_self = self._parent_to_self_original * old_world_to_joint.inverse() * new_world_to_joint
-		self._self_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._self_to_child_original
-		
-		self.world_to_self = self.parent_link.transform_world_to_self * self._parent_to_self
-  
-		return self.world_to_self
 	
 	def _determine_joint_type(self) -> str:
 		"""Determine the type of joint from the prim."""
@@ -463,27 +484,6 @@ class USDJoint:
 				if targets:
 					body1_prim = self.prim.GetStage().GetPrimAtPath(str(targets[0]))
 		return body0_prim, body1_prim
-	
-	def _extract_joint_properties(self) -> Dict[str, Any]:
-		"""Extract all joint properties from the joint prim."""
-		properties = {}
-		for prop in self.prim.GetProperties():
-			prop_name = prop.GetName()
-			try:
-				prop_value = prop.Get()
-				properties[prop_name] = prop_value
-			except:
-				# Some properties might not have values
-				properties[prop_name] = None
-		return properties
-	
-	def get_property(self, property_name: str) -> Any:
-		"""Get a specific joint property by name."""
-		return self.properties.get(property_name)
-	
-	def has_property(self, property_name: str) -> bool:
-		"""Check if joint has a specific property."""
-		return property_name in self.properties
 	
 	def get_axis(self) -> Optional[List[float]]:
 		"""Get the joint axis vector in world coordinates."""
