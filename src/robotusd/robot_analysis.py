@@ -77,7 +77,7 @@ class BaseRobotAnalysis:
 		
 		chain_id = len(chains)
 		for link in unvisited_links:
-			if not link.parent_joint:  # Another root
+			if not link.parent:  # Another root
 				traverse_from_link(link, [], chain_id)
 				chain_id += 1
 		
@@ -122,6 +122,7 @@ class BaseRobotAnalysis:
 		
 		# All joints align
 		aligned_joints = self._validate_aligned_joints({'joints': analysis_joints})
+		aligned_links = self._validate_aligned_links({'links': [j.parent for j in analysis_joints if j.parent]})
 		
 		# Detect grippers in the chain
 		# Detect gripper configuration - for now, simplified detection on single chain
@@ -137,10 +138,11 @@ class BaseRobotAnalysis:
 			'joint_types': [j.joint_type for j in analysis_joints],
 			'joint_axes': joint_axes,
 			'aligned_joints': aligned_joints,
+			'aligned_links': aligned_links,
 			'axis_sequence': joint_axes,
 			'total_reach': total_reach,
-			'start_link': analysis_joints[0].parent_link.name if analysis_joints and analysis_joints[0].parent_link else 'unknown',
-			'end_link': analysis_joints[-1].child_link.name if analysis_joints and analysis_joints[-1].child_link else 'unknown',
+			'start_link': analysis_joints[0].parent.name if analysis_joints and analysis_joints[0].parent else 'unknown',
+			'end_link': analysis_joints[-1].children[0].name if analysis_joints and getattr(analysis_joints[-1], 'children', []) and len(analysis_joints[-1].children) > 0 else 'unknown',
 			'chain_type': chain_type,
 			'joints': analysis_joints,  # Keep reference to actual joint objects (pruned)
 			'end_effector_joints': [j.name for j in end_effector_joints],
@@ -257,14 +259,39 @@ class BaseRobotAnalysis:
 		alignment_joints = []
 		from .math_utils import quaternion_to_rotation_matrix, normalize_vector
 		for joint in joints:
-			world_translate, world_quat = joint.transform_world_to_self.pose
-			world_quat = normalize_vector(world_quat)
-			if np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6):
-				alignment_joints.append(True)
-			else:
-				alignment_joints.append(False)
+			alignment_joints.append(joint.is_world_aligned())
 				
 		return alignment_joints
+
+	def _validate_aligned_links(self, chain: Dict[str, Any]) -> List[bool]:
+		"""
+		Validates which links in the chain have the same orientation as the reference (first) link.
+		
+		This function checks each link in a kinematic chain to see if it has the same orientation
+		as the reference link (first link), which is important for determining structural consistency.
+		
+		Args:
+			chain: Dictionary containing chain information with 'links' key
+			
+		Returns:
+			List[bool]: List of booleans, one for each link, indicating if that link's 
+					   orientation is aligned with the reference link's orientation
+		"""
+		if not chain or 'links' not in chain:
+			return []
+		
+		links = chain['links']
+		if len(links) == 0:
+			return []
+		
+		if len(links) == 1:
+			return [True]
+
+		alignment_links = []
+		for link in links:
+			alignment_links.append(link.is_world_aligned())
+		
+		return alignment_links
 
 	def _prune_end_effector_joints(self, joints: List[USDJoint]) -> List[USDJoint]:
 		"""
@@ -1250,6 +1277,17 @@ class RobotArmAnalysis(BaseRobotAnalysis):
 						report += "    ✗ No joints aligned to worldframe\n"
 					else:
 						report += "    ⚠ Some joints not aligned to worldframe\n"
+				
+				if 'aligned_links' in chain and chain['aligned_links']:
+					aligned_count = sum(chain['aligned_links'])
+					total_links = len(chain['aligned_links'])
+					report += f"  Links aligned to worldframe: {aligned_count}/{total_links}\n"
+					if aligned_count == total_links:
+						report += "    ✓ All links aligned to worldframe\n"
+					elif aligned_count == 0:
+						report += "    ✗ No links aligned to worldframe\n"
+					else:
+						report += "    ⚠ Some links not aligned to worldframe\n"
 				
 				# Show gripper information if present
 				if chain.get('gripper_info', {}).get('has_gripper'):

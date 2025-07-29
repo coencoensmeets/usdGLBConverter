@@ -6,7 +6,7 @@ import math
 import copy
 import numpy as np
 from .math_utils import (
-	quat_to_list, euler_to_quat, HomogeneousMatrix, quat_multiply,string_to_XYZList
+	quat_to_list, euler_to_quat, HomogeneousMatrix, quat_multiply,string_to_XYZList, normalize_vector
 )
 from typing import List, Tuple, Optional, Dict, Any, Union, Set
 from collections import defaultdict
@@ -26,9 +26,9 @@ class USDFrame:
 		self._static_transform: Optional[HomogeneousMatrix] = None
 		self._parent_to_self: Optional[HomogeneousMatrix] = None
 		self._self_to_child: Optional[HomogeneousMatrix] = None
-		self._world_to_self: Optional[HomogeneousMatrix] = None
-		self._parent_to_self_original: Optional[HomogeneousMatrix] = None
-		self._self_to_child_original: Optional[HomogeneousMatrix] = None
+		self._world_to_self: Optional[HomogeneousMatrix] = HomogeneousMatrix.identity()
+		self._parent_to_self_original: Optional[HomogeneousMatrix] = HomogeneousMatrix.identity()
+		self._self_to_child_original: Optional[HomogeneousMatrix] = HomogeneousMatrix.identity()
   
 	@property
 	def transform_parent_to_self(self) -> HomogeneousMatrix:
@@ -61,16 +61,16 @@ class USDFrame:
 
 	def __calculate_world_transform(self)->None:
 		"""Get the world transformation as HomogeneousMatrix object for the joint frame position."""
-		if not self.parent_link:
+		if not self.parent:
 			return self._parent_to_self_original.copy()
 		# Get the current world transform
-		old_world_to_joint = self.parent_link.transform_world_to_self * self._parent_to_self_original.copy()
+		old_world_to_joint = self.parent.transform_world_to_self * self._parent_to_self_original.copy()
 		new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
 
 		self._parent_to_self = self._parent_to_self_original * old_world_to_joint.inverse() * new_world_to_joint
 		self._self_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._self_to_child_original
 		
-		self._world_to_self = self.parent_link.transform_world_to_self * self._parent_to_self
+		self._world_to_self = self.parent.transform_world_to_self * self._parent_to_self
   
 		return self._world_to_self
   
@@ -99,6 +99,12 @@ class USDFrame:
 		"""Get all properties of this frame."""
 		return copy.deepcopy(self.properties)
 
+	def is_world_aligned(self)->bool:
+		"""Check if the joint is aligned with the world frame."""
+		world_translate, world_quat = self.transform_world_to_self.pose
+		world_quat = normalize_vector(world_quat)
+		return np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6)
+
 class USDRoot:
 	"""Base class for root prim in USD hierarchy."""
 	def __init__(self, prim: Any, name: str = None) -> None:
@@ -116,32 +122,21 @@ class USDRoot:
 			self._compute_world_transform()
 		return self._world_transform.copy()
 
-class USDLink:
+class USDLink(USDFrame):
 	"""
 	Represents a robot link with its geometry and transformation data.
 	Uses homogeneous transformation matrices for all pose calculations.
 	"""
 	def __init__(self, prim: Any, name: str = None) -> None:
-		self.prim: Any = prim
-		self.name: str = name or prim.GetName()
+		super().__init__(prim, name=name)
 		logger.debug(f"Creating USDLink: {self.name}, Type: {prim.GetTypeName()}, Path: {prim.GetPath()}")
 		
-		# Extract local transform from USD
+		# Create local transformation matrix (link frame relative to parent exit frame)
 		self.translation, self.rotation, self.scale = self._extract_transform()
 		logger.debug(f"  Transform - Translation: {self.translation}, Rotation: {self.rotation}")
-		
-		# Create local transformation matrix (link frame relative to parent joint frame)
 		self._local_transform = HomogeneousMatrix.from_pose(self.translation, self.rotation)
 		
-		# World transformation matrix (will be computed on first access)
-		self._world_transform: Optional[HomogeneousMatrix] = None
-		self._world_transform_original: Optional[HomogeneousMatrix] = None
-		self._local_transform_aligned: Optional[HomogeneousMatrix] = None
-		
 		self.meshes: List['USDMesh'] = []
-		self.joints: List['USDJoint'] = []
-		self.parent_joint: Optional['USDJoint'] = None
-		self.properties: Dict[str, Any] = self._extract_link_properties()
 		
 		# Cache for expensive operations
 		self._all_child_links_cache: Optional[List['USDLink']] = None
@@ -152,43 +147,11 @@ class USDLink:
 	def local_transform(self) -> HomogeneousMatrix:
 		"""Get the local transformation as HomogeneousMatrix object."""
 		return self._local_transform.copy()
-	
-	@property
-	def transform_world_to_self(self) -> HomogeneousMatrix:
-		"""Get the world transformation as HomogeneousMatrix object."""
-		if self._world_transform is None:
-			self._compute_world_transform()
-		return self._world_transform.copy()
 
 	@property
-	def transform_parent_to_link(self) -> HomogeneousMatrix:
-		"""Get the transformation from parent joint frame to this link's frame."""
-		if self.parent_joint:
-			return self.parent_joint.transform_self_to_child
-		return HomogeneousMatrix.identity()
-	
-	def _compute_world_transform(self) -> None:
-		"""Compute the world transformation matrix by traversing from base."""
-		if not self.parent_joint or not self.parent_joint.parent_link:
-			# This is the base link
-			self._world_transform = self._local_transform.copy()
-			logger.debug(f"Link {self.name} is base - using local transform as world transform")
-		else:
-			# Get parent's world transform and joint transform
-			world_to_parent = self.parent_joint.transform_world_to_self
-			
-			# World transform = Parent_world * joint_to_child * Link_local
-			self._world_transform = world_to_parent * self.transform_parent_to_link
-			
-			logger.debug(f"Link {self.name} world transform computed from parent chain")
-	
-	def get_world_pose(self) -> Tuple[List[float], List[float]]:
-		"""Get world pose as (translation, quaternion)."""
-		return self.transform_world_to_self.pose
-	
-	def get_local_pose(self) -> Tuple[List[float], List[float]]:
-		"""Get local pose as (translation, quaternion)."""
-		return self.translation.copy(), self.rotation.copy()
+	def joints(self) -> List['USDJoint']:
+		"""Get all joints connected to this link."""
+		return [child for child in self.children if isinstance(child, USDJoint)]
 
 	def _extract_transform(self) -> Tuple[List[float], List[float], List[float]]:
 		"""Extract translation, rotation, and scale from the USD prim."""
@@ -289,8 +252,8 @@ class USDLink:
 
 	def add_joint(self, joint: 'USDJoint') -> None:
 		"""Add a child joint to this link."""
-		self.joints.append(joint)
-		joint.parent_link = self
+		self.children.append(joint)
+		joint.parent = self
 		# Invalidate caches
 		self._all_child_links_cache = None
 
@@ -304,10 +267,6 @@ class USDLink:
 					child_links.extend(joint.child_link.get_all_child_links())
 			self._all_child_links_cache = child_links
 		return self._all_child_links_cache
-
-	def get_position(self) -> List[float]:
-		"""Get the position of this link."""
-		return self.translation
 
 	def _find_transform_prim_for_body(self, body_prim: Any) -> Optional[Any]:
 		"""Find the corresponding transform prim for a physics body prim."""
@@ -350,19 +309,6 @@ class USDLink:
 				continue
 		logger.debug(f"  No transform prim found for {body_name}")
 		return None
-
-	def _extract_link_properties(self) -> Dict[str, Any]:
-		"""Extract all joint properties from the joint prim."""
-		properties = {}
-		for prop in self.prim.GetProperties():
-			prop_name = prop.GetName()
-			try:
-				prop_value = prop.Get()
-				properties[prop_name] = prop_value
-			except:
-				# Some properties might not have values
-				properties[prop_name] = None
-		return properties
 
 	def __str__(self) -> str:
 		return f"USDLink({self.name})"
@@ -492,7 +438,7 @@ class USDJoint(USDFrame):
 			return None
 		
 		# Transform local axis to world coordinates using world transform matrix
-		world_to_self = self.parent_link.transform_world_to_self * self._parent_to_self_original
+		world_to_self = self.parent.transform_world_to_self * self._parent_to_self_original
 		world_axis = world_to_self.transform_vector(local_axis)
 		# Round to 3 decimals for the axis
 		world_axis = [round(x, 3) for x in world_axis]
@@ -973,9 +919,9 @@ class USDRobot:
 				joint = self.joints[joint_prim.GetName()]
 				
 				# Set up the joint connections
-				joint.parent_link = parent_link
+				joint.parent = parent_link
 				joint.child_link = child_link
-				child_link.parent_joint = joint
+				child_link.parent = joint
 				
 				# Add joint to parent link
 				parent_link.add_joint(joint)
@@ -1135,13 +1081,13 @@ class USDRobot:
 		"""Identify the base link of the robot."""
 		# Look for link with 'base' in name
 		for link in self.links.values():
-			if 'base' in link.name.lower() and not link.parent_joint:
+			if 'base' in link.name.lower() and not link.parent:
 				self.base_link = link
 				return
 		
 		# Fallback: find link with no parent joint
 		for link in self.links.values():
-			if not link.parent_joint:
+			if not link.parent:
 				self.base_link = link
 				return
 		
@@ -1332,17 +1278,17 @@ class USDRobot:
 		
 		# Check 1 & 2: Joint and link validation in one pass
 		for joint in self.joints.values():
-			if not joint.parent_link:
+			if not joint.parent:
 				issues.append(f"Joint '{joint.name}' has no parent link")
-			if not joint.child_link:
-				issues.append(f"Joint '{joint.name}' has no child link")
+			if len(joint.children) != 1:
+				issues.append(f"Joint '{joint.name}' has multiple child links: {', '.join([l.name for l in joint.children if isinstance(l, USDLink)])}")
 		
 		for link in self.links.values():
-			if link != self.base_link and not link.parent_joint:
+			if link != self.base_link and not link.parent:
 				issues.append(f"Link '{link.name}' has no parent joint (and is not base link)")
 		
 		# Check 3: Base link validation
-		if self.base_link and self.base_link.parent_joint:
+		if self.base_link and self.base_link.parent:
 			issues.append(f"Base link '{self.base_link.name}' has a parent joint")
 		
 		# Check 4: Circular references using iterative approach
@@ -1584,9 +1530,9 @@ class USDRobot:
 		"""Debug method to print detailed transform information."""
 		print(f"\n=== LINK TRANSFORM DEBUG for {self.name} ===")
 		print(f"Is base link: {self == getattr(self, '_robot_base_link', None) if hasattr(self, '_robot_base_link') else 'unknown'}")
-		print(f"Has parent joint: {self.parent_joint is not None}")
-		if self.parent_joint:
-			print(f"Parent joint: {self.parent_joint.name}")
+		print(f"Has parent joint: {self.parent is not None}")
+		if self.parent:
+			print(f"Parent joint: {self.parent.name}")
 		
 		# Local transform
 		print(f"Local translation: {self.translation}")

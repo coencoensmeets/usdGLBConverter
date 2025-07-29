@@ -88,13 +88,13 @@ class USDToGLTFConverter:
         """Create a glTF node dictionary from a USDLink with proper relative transforms."""
         node_dict = {"name": link.name}
 
-        if link.parent_joint:
+        if link.parent:
             # Use the joint's transform property for the link's transform relative to the joint frame
-            local_matrix = link.transform_parent_to_link
+            local_matrix = link.transform_parent_to_self
             translation, quaternion = self._extract_pose_from_matrix(local_matrix)
             node_dict["translation"] = translation
             node_dict["rotation"] = quaternion
-            logger.debug(f"glTF link node for {link.name} (child of joint {link.parent_joint.name}):")
+            logger.debug(f"glTF link node for {link.name} (child of joint {link.parent.name}):")
             logger.debug(f"  Final translation: {translation}")
             logger.debug(f"  Final quaternion: {quaternion}")
         else:
