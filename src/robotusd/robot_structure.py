@@ -67,7 +67,7 @@ class USDFrame:
 		old_world_to_joint = self.parent.transform_world_to_self * self._parent_to_self_original.copy()
 		new_world_to_joint = HomogeneousMatrix.from_pose(old_world_to_joint.translation, [0.0, 0.0, 0.0, 1.0])
 
-		self._parent_to_self = self._parent_to_self_original * old_world_to_joint.inverse() * new_world_to_joint
+		self._parent_to_self = self.parent.transform_self_to_child * self._parent_to_self_original * old_world_to_joint.inverse() * new_world_to_joint
 		self._self_to_child = new_world_to_joint.inverse() * old_world_to_joint * self._self_to_child_original
 		
 		self._world_to_self = self.parent.transform_world_to_self * self._parent_to_self
@@ -99,10 +99,49 @@ class USDFrame:
 		"""Get all properties of this frame."""
 		return copy.deepcopy(self.properties)
 
+	def get_chain(self)-> List['USDFrame']:
+		"""Get the chain of frames from this frame up to the root."""
+		chain = []
+		current_frame = self
+		while current_frame:
+			chain.append(current_frame)
+			current_frame = current_frame.parent
+		return chain
+
+	def validate_transform_world_to_self(self)->bool:
+		"""Validate if the world to self transformation is correct by comparing the transform to world frame to the transform that is obtained by going down the chain."""
+		
+		chain = self.get_chain()
+		transform_world_to_self_check = HomogeneousMatrix.identity()
+		# Traverse the chain from self up to the root, accumulating transforms
+		for frame in reversed(chain):
+			if hasattr(frame, 'transform_parent_to_self'):
+				transform_world_to_self_check = transform_world_to_self_check * frame.transform_parent_to_self
+			else:
+				# If frame does not have transform_parent_to_self, skip
+				continue
+
+		# Compare with the stored world_to_self
+		is_close = np.allclose(transform_world_to_self_check.matrix, self.transform_world_to_self.matrix, atol=1e-3)
+		
+		return is_close
+
+	def align_to_world(self) -> None:
+		"""Align this frame's transform to the world frame."""
+		chain = self.get_chain()
+  
+		for frame in reversed(chain):
+			frame.__calculate_world_transform()
+
 	def is_world_aligned(self)->bool:
 		"""Check if the joint is aligned with the world frame."""
+		self.align_to_world()
+		world_correct = self.validate_transform_world_to_self()
+		if not world_correct:
+			return False
 		world_translate, world_quat = self.transform_world_to_self.pose
 		world_quat = normalize_vector(world_quat)
+		print(f"({self.name}) {world_correct}-{np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6)}")
 		return np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6)
 
 class USDRoot:
@@ -135,6 +174,7 @@ class USDLink(USDFrame):
 		self.translation, self.rotation, self.scale = self._extract_transform()
 		logger.debug(f"  Transform - Translation: {self.translation}, Rotation: {self.rotation}")
 		self._local_transform = HomogeneousMatrix.from_pose(self.translation, self.rotation)
+		print(f"({self.name}) local transform: {self._local_transform}")
 		
 		self.meshes: List['USDMesh'] = []
 		
@@ -142,6 +182,11 @@ class USDLink(USDFrame):
 		self._all_child_links_cache: Optional[List['USDLink']] = None
 		self._all_materials_cache: Optional[List[Any]] = None
 		self._material_summary_cache: Optional[Dict[str, Any]] = None
+  
+	def __str__(self) -> str:
+		return f"USDLink({self.name})"
+	def __repr__(self) -> str:
+		return self.__str__()
 	
 	@property
 	def local_transform(self) -> HomogeneousMatrix:
@@ -152,6 +197,21 @@ class USDLink(USDFrame):
 	def joints(self) -> List['USDJoint']:
 		"""Get all joints connected to this link."""
 		return [child for child in self.children if isinstance(child, USDJoint)]
+
+	@property
+	def parent_joint(self) -> Optional['USDJoint']:
+		"""Get the closest parent joint in the chain by traversing up through the hierarchy."""
+		current = self.parent
+		
+		# Traverse up the chain until we find a joint or reach the root
+		while current is not None:
+			if isinstance(current, USDJoint):
+				return current
+			# Move to the next parent in the chain
+			current = current.parent
+		
+		# No joint found in the parent chain
+		return None
 
 	def _extract_transform(self) -> Tuple[List[float], List[float], List[float]]:
 		"""Extract translation, rotation, and scale from the USD prim."""
@@ -310,11 +370,6 @@ class USDLink(USDFrame):
 		logger.debug(f"  No transform prim found for {body_name}")
 		return None
 
-	def __str__(self) -> str:
-		return f"USDLink({self.name})"
-	def __repr__(self) -> str:
-		return self.__str__()
-
 	def get_all_materials(self) -> List[Any]:
 		"""Get all unique material prims used by this link's meshes (cached)."""
 		if self._all_materials_cache is None:
@@ -397,6 +452,36 @@ class USDJoint(USDFrame):
 		# Reset world transforms of child links since joint value changed
 		if self.child_link:
 			self.child_link.reset_world_transform()
+   
+	@property
+	def child_link(self) -> Optional[USDLink]:
+		"""Get the child link connected by this joint."""
+		for child in self.children:
+			if isinstance(child, USDLink):
+				return child
+		return None
+
+	@property
+	def parent_link(self) -> Optional[USDLink]:
+		"""Get the parent link connected by this joint."""
+		if self.parent and isinstance(self.parent, USDLink):
+			return self.parent
+		return None
+
+	@property
+	def parent_joint(self) -> Optional['USDJoint']:
+		"""Get the closest parent joint in the chain by traversing up through the hierarchy."""
+		current = self.parent
+		
+		# Traverse up the chain until we find a joint or reach the root
+		while current is not None:
+			if isinstance(current, USDJoint):
+				return current
+			# Move to the next parent in the chain
+			current = current.parent
+		
+		# No joint found in the parent chain
+		return None
 	
 	def _determine_joint_type(self) -> str:
 		"""Determine the type of joint from the prim."""
@@ -616,6 +701,20 @@ class USDMesh:
 		if self.materials:
 			material_names = self.get_all_material_names()
 			logger.debug(f"  -> Materials: {material_names}")
+   
+	def __str__(self) -> str:
+		if self.has_multiple_materials():
+			material_names = self.get_all_material_names()
+			material_info = f" ({len(material_names)} materials: {', '.join(material_names)})"
+		elif self.has_material():
+			material_info = f" (material: {self.get_material_name()})"
+		else:
+			material_info = " (no materials)"
+		
+		return f"USDMesh({self.name}{material_info})"
+	
+	def __repr__(self) -> str:
+		return self.__str__()
 	
 	def _find_geom_subset_materials_optimized(self) -> None:
 		"""Find all GeomSubset children with material bindings - optimized version."""
@@ -686,20 +785,6 @@ class USDMesh:
 	def get_material_name(self) -> Optional[str]:
 		"""Get the name of the first assigned material (for backward compatibility)."""
 		return self.materials[0].GetName() if self.materials else None
-	
-	def __str__(self) -> str:
-		if self.has_multiple_materials():
-			material_names = self.get_all_material_names()
-			material_info = f" ({len(material_names)} materials: {', '.join(material_names)})"
-		elif self.has_material():
-			material_info = f" (material: {self.get_material_name()})"
-		else:
-			material_info = " (no materials)"
-		
-		return f"USDMesh({self.name}{material_info})"
-	
-	def __repr__(self) -> str:
-		return self.__str__()
 
 class USDRobot:
 	"""
@@ -920,11 +1005,15 @@ class USDRobot:
 				
 				# Set up the joint connections
 				joint.parent = parent_link
-				joint.child_link = child_link
+				joint.children.append(child_link)
+				joint.align_to_world()
 				child_link.parent = joint
 				
 				# Add joint to parent link
 				parent_link.add_joint(joint)
+    
+				# NOT WORKING FOR LINKS YET
+				# child_link.align_to_world()
 				
 				logger.debug(f"Connected joint {joint.name}: {parent_link.name} -> {child_link.name}")
 		
@@ -1168,11 +1257,6 @@ class USDRobot:
 	def get_joint_world_transforms(self) -> Dict[str, HomogeneousMatrix]:
 		"""Get world transformation matrices for all joints as HomogeneousMatrix objects."""
 		return {joint_name: joint.get_world_transform() for joint_name, joint in self.joints.items()}
-	
-	def update_all_transforms(self) -> None:
-		"""Force update of all world transforms by invalidating caches and recomputing."""
-		logger.debug("Updating all world transforms...")
-		self._compute_world_transformations()
 	
 	def get_link_poses_in_world(self) -> Dict[str, Tuple[List[float], List[float]]]:
 		"""Get world poses (translation, quaternion) for all links."""

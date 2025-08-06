@@ -34,17 +34,127 @@ class USDToGLTFConverter:
         self._transform_cache: Dict[Any, Tuple[Gf.Vec3d, Gf.Rotation, Gf.Vec3d]] = {}
 
     def convert_robot_to_gltf(self) -> None:
-        """Convert the USDRobot structure directly to glTF format."""
+        """Convert the USDRobot structure to glTF format with joint-centric hierarchy."""
         if not self.robot.base_link:
             logger.error("No base link found in robot!")
             return
         
-        logger.info(f"Converting robot structure starting from base link: {self.robot.base_link.name}")
+        logger.info(f"Converting robot structure to joint-centric hierarchy starting from base link: {self.robot.base_link.name}")
         
-        # Process the robot hierarchy starting from base link
-        self._process_link_recursive(self.robot.base_link, parent_node_idx=None)
+        # Create root joint node for the base link
+        self._process_joint_centric_hierarchy(self.robot.base_link, parent_node_idx=None)
         
-        logger.info(f"Created {len(self.gltf_nodes)} glTF nodes")
+        logger.info(f"Created {len(self.gltf_nodes)} glTF nodes in joint-centric hierarchy")
+
+    def _process_joint_centric_hierarchy(self, link: USDLink, parent_node_idx: Optional[int] = None) -> int:
+        """Process robot hierarchy in joint-centric format: Joint -> Link (with meshes) -> Child Joints."""
+        if link.parent:
+            # This link has a parent joint, so create the joint node first
+            joint = link.parent
+            joint_node_idx = self._create_joint_node(joint, parent_node_idx)
+            
+            # Create link node as child of joint node
+            link_node_idx = self._create_link_node(link, joint_node_idx)
+            
+            # Process child joints recursively
+            for child_joint in link.joints:
+                if child_joint.child_link:
+                    self._process_joint_centric_hierarchy(child_joint.child_link, joint_node_idx)
+            
+            return joint_node_idx
+        else:
+            # This is the base link - create it directly and then process its joints
+            link_node_idx = self._create_link_node(link, parent_node_idx)
+            
+            # Process child joints recursively  
+            for child_joint in link.joints:
+                if child_joint.child_link:
+                    self._process_joint_centric_hierarchy(child_joint.child_link, link_node_idx)
+            
+            return link_node_idx
+
+    def _create_joint_node(self, joint, parent_node_idx: Optional[int]) -> int:
+        """Create a glTF node for a joint using relative transform to parent."""
+        joint_node_idx = len(self.gltf_nodes)
+        joint_node = {"name": joint.name}
+
+        # Use relative transform between parent and this joint
+        print(f"World_self: {joint.transform_world_to_self}")
+        parent_joint = joint.parent_joint
+        if parent_joint:
+            print(f"world_parent_inverse: {parent_joint.transform_world_to_self.inverse()}")
+            relative_transform = parent_joint.transform_world_to_self.inverse() * joint.transform_world_to_self
+        else:
+            # Root joint - use world transform
+            relative_transform = joint.transform_world_to_self
+
+        print(f"From {parent_joint.name if parent_joint else 'World'} to {joint.name} - Relative Transform: {relative_transform}")
+        translation, quaternion = self._extract_pose_from_matrix(relative_transform)
+        
+        # Only add non-identity transforms to reduce file size
+        if translation != [0.0, 0.0, 0.0]:
+            joint_node["translation"] = translation
+        if quaternion != [0.0, 0.0, 0.0, 1.0]:
+            joint_node["rotation"] = quaternion
+
+        self.gltf_nodes.append(joint_node)
+        
+        # Add to parent's children if it has a parent
+        if parent_node_idx is not None:
+            if "children" not in self.gltf_nodes[parent_node_idx]:
+                self.gltf_nodes[parent_node_idx]["children"] = []
+            self.gltf_nodes[parent_node_idx]["children"].append(joint_node_idx)
+        
+        logger.debug(f"Created joint node {joint_node_idx} for joint: {joint.name}")
+        logger.debug(f"  Translation: {translation}")
+        logger.debug(f"  Rotation: {quaternion}")
+        return joint_node_idx
+
+    def _create_link_node(self, link: USDLink, parent_node_idx: Optional[int]) -> int:
+        """Create a glTF node for a link with its meshes."""
+        link_node_idx = len(self.gltf_nodes)
+        link_node = {"name": f"{link.name}_link"}
+
+        # For joint-centric hierarchy, links should have the transform from joint to link geometry
+        if link.parent:
+            # Link has a parent joint - use transform_self_to_child from the joint
+            joint = link.parent
+            relative_transform = joint.transform_self_to_child
+            translation, quaternion = self._extract_pose_from_matrix(relative_transform)
+            
+            # Only add non-identity transforms to reduce file size
+            if translation != [0.0, 0.0, 0.0]:
+                link_node["translation"] = translation
+            if quaternion != [0.0, 0.0, 0.0, 1.0]:
+                link_node["rotation"] = quaternion
+        else:
+            # Base link - use its local transform
+            translation, quaternion = self._extract_pose_from_matrix(link.local_transform)
+            if translation != [0.0, 0.0, 0.0]:
+                link_node["translation"] = translation
+            if quaternion != [0.0, 0.0, 0.0, 1.0]:
+                link_node["rotation"] = quaternion
+
+        # Process materials for this link first
+        self._process_link_materials(link)
+        
+        # Process meshes for this link
+        mesh_indices = self._process_link_meshes(link)
+        if mesh_indices:
+            # For now, just use the first mesh (glTF nodes can only reference one mesh)
+            link_node["mesh"] = mesh_indices[0]
+
+        self.gltf_nodes.append(link_node)
+        self.link_to_node_idx[link] = link_node_idx
+        
+        # Add to parent's children if it has a parent
+        if parent_node_idx is not None:
+            if "children" not in self.gltf_nodes[parent_node_idx]:
+                self.gltf_nodes[parent_node_idx]["children"] = []
+            self.gltf_nodes[parent_node_idx]["children"].append(link_node_idx)
+        
+        logger.debug(f"Created link node {link_node_idx} for link: {link.name}")
+        return link_node_idx
 
     def _process_link_recursive(self, link: USDLink, parent_node_idx: Optional[int] = None) -> int:
         """Recursively process links and create glTF nodes with intermediate frame nodes."""
@@ -91,6 +201,7 @@ class USDToGLTFConverter:
         if link.parent:
             # Use the joint's transform property for the link's transform relative to the joint frame
             local_matrix = link.transform_parent_to_self
+            print(f"From {link.parent.name} to {link.name} - Local Matrix: {local_matrix}")
             translation, quaternion = self._extract_pose_from_matrix(local_matrix)
             node_dict["translation"] = translation
             node_dict["rotation"] = quaternion
@@ -113,6 +224,7 @@ class USDToGLTFConverter:
 
         # Use the joint's transform_parent_to_joint property for the frame node
         joint_frame_matrix = joint.transform_parent_to_self
+        print(f"from {joint.parent.name} to {joint.name} - Joint Frame Matrix: {joint_frame_matrix}")
         translation, quaternion = self._extract_pose_from_matrix(joint_frame_matrix)
         if translation != [0.0, 0.0, 0.0]:
             frame_node["translation"] = translation
@@ -158,21 +270,22 @@ class USDToGLTFConverter:
             logger.debug(f"Mesh has multiple materials: {usd_mesh.get_all_material_names()}")
 
         # Get the 4x4 transformation matrix from the link
-        if self.robot.get_object_from_primName(link.prim.GetName()) is None:
-            logger.warning(f"Link '{link.name}' not found in robot structure - Using no additional transformation")
-            translation = [0.0, 0.0, 0.0]
-            quaternion = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion (x, y, z, w)
-            scale = [1.0, 1.0, 1.0]
-        else:
-            transform_world_to_parent = self.robot.get_object_from_primName(link.prim.GetParent().GetName()).transform_world_to_self
-            transform_parent_to_mesh = link.local_transform
-            transform_world_to_link = link.transform_world_to_self
-            transform_link_to_mesh = transform_world_to_link.inverse() * transform_world_to_parent * transform_parent_to_mesh
-            translation, quaternion = transform_link_to_mesh.pose
-            if hasattr(link.scale, '__len__') and len(link.scale) == 3:
-                scale = [float(link.scale[0]), float(link.scale[1]), float(link.scale[2])]
-            else:
-                scale = [1.0, 1.0, 1.0]  # Default scale
+        # if self.robot.get_object_from_primName(link.prim.GetName()) is None:
+        #     logger.warning(f"Link '{link.name}' not found in robot structure - Using no additional transformation")
+        #     translation = [0.0, 0.0, 0.0]
+        #     quaternion = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion (x, y, z, w)
+        #     scale = [1.0, 1.0, 1.0]
+        # else:
+        #     transform_world_to_parent = self.robot.get_object_from_primName(link.prim.GetParent().GetName()).transform_world_to_self
+        #     transform_parent_to_mesh = link.local_transform
+        #     transform_world_to_link = link.transform_world_to_self
+        #     transform_link_to_mesh = transform_world_to_link.inverse() * transform_world_to_parent * transform_parent_to_mesh
+        #     translation, quaternion = transform_link_to_mesh.pose
+        #     print(f"Test: {quaternion}")
+        #     if hasattr(link.scale, '__len__') and len(link.scale) == 3:
+        #         scale = [float(link.scale[0]), float(link.scale[1]), float(link.scale[2])]
+        #     else:
+        #         scale = [1.0, 1.0, 1.0]  # Default scale
                 
         translation = [0,0,0]
         quaternion = [0,0,0,1]  # Default to identity if no link transform
@@ -553,10 +666,19 @@ class USDToGLTFConverter:
         """Create and write the final glTF file."""
         gltf_path = path
         bin_path = gltf_path.replace('.gltf', '.bin')
-        # Find root nodes (nodes with no parent)
+        # Find root nodes (in joint-centric hierarchy, this is the base link or first joint)
         root_nodes: List[int] = []
-        if self.robot.base_link and self.robot.base_link in self.link_to_node_idx:
-            root_nodes = [self.link_to_node_idx[self.robot.base_link]]
+        
+        # Find the first node that's not a child of any other node
+        children_set = set()
+        for node in self.gltf_nodes:
+            if "children" in node:
+                children_set.update(node["children"])
+        
+        for i, node in enumerate(self.gltf_nodes):
+            if i not in children_set:
+                root_nodes.append(i)
+                break  # We expect only one root in a robot hierarchy
         
         # Create final glTF structure
         gltf: Dict[str, Any] = {
@@ -592,10 +714,19 @@ class USDToGLTFConverter:
     def _create_final_glb(self, path: str) -> None:
         """Create and write the final glTF binary (GLB) file."""
         gltf_path = path
-        # Find root nodes (nodes with no parent)
+        # Find root nodes (in joint-centric hierarchy, this is the base link or first joint)
         root_nodes: List[int] = []
-        if self.robot.base_link and self.robot.base_link in self.link_to_node_idx:
-            root_nodes = [self.link_to_node_idx[self.robot.base_link]]
+        
+        # Find the first node that's not a child of any other node
+        children_set = set()
+        for node in self.gltf_nodes:
+            if "children" in node:
+                children_set.update(node["children"])
+        
+        for i, node in enumerate(self.gltf_nodes):
+            if i not in children_set:
+                root_nodes.append(i)
+                break  # We expect only one root in a robot hierarchy
         # Create final glTF structure (JSON chunk)
         gltf: Dict[str, Any] = {
             "asset": {"version": "2.0"},

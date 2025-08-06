@@ -21,7 +21,7 @@ if __name__ == "__main__":
     # logger.setLevel(logging.DEBUG)
     
     # usd_file = "Assets/Robots/Unitree/Go2/go2.usd"
-    usd_file = "Assets/Robots/Franka/franka.usd" 
+    # usd_file = "Assets/Robots/Franka/franka.usd" 
     # usd_file = "Assets/Robots/Festo/FestoCobot/festo_cobot.usd"  
     if not os.path.exists(usd_file):
         logger.error(f"USD file {usd_file} does not exist.")
