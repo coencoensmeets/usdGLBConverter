@@ -141,7 +141,6 @@ class USDFrame:
 			return False
 		world_translate, world_quat = self.transform_world_to_self.pose
 		world_quat = normalize_vector(world_quat)
-		print(f"({self.name}) {world_correct}-{np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6)}")
 		return np.allclose(world_quat, [0, 0, 0, 1], atol=1e-6)
 
 class USDRoot:
@@ -174,7 +173,6 @@ class USDLink(USDFrame):
 		self.translation, self.rotation, self.scale = self._extract_transform()
 		logger.debug(f"  Transform - Translation: {self.translation}, Rotation: {self.rotation}")
 		self._local_transform = HomogeneousMatrix.from_pose(self.translation, self.rotation)
-		print(f"({self.name}) local transform: {self._local_transform}")
 		
 		self.meshes: List['USDMesh'] = []
 		
@@ -863,6 +861,8 @@ class USDRobot:
 			logger.info(f"Identified base link: {self.base_link.name}")
 		else:
 			logger.warning("No base link identified")
+   
+		self._align_to_world()
 		
 		# Validate the joint tree structure
 		self.validate_joint_tree()
@@ -989,6 +989,23 @@ class USDRobot:
 				return {'edges': {}, 'joint_map': {}, 'roots': set()}
 		
 		return {'edges': edges, 'joint_map': joint_map, 'roots': root_bodies}
+
+	def _align_to_world(self) -> None:
+		""""Try to align all links and joints to the world coordinate system."""
+		if not self.base_link:
+			return
+		visited = set()
+		stack = [self.base_link]
+		while stack:
+			link = stack.pop()
+			if link in visited:
+				continue
+			visited.add(link)
+			link.align_to_world()
+			for joint in link.joints:
+				joint.align_to_world()
+				if joint.child_link and joint.child_link not in visited:
+					stack.append(joint.child_link)
 	
 	def _assign_joint_relationships(self, tree_structure: Dict, joint_data: List) -> None:
 		"""Assign parent-child relationships to joints based on tree structure."""
@@ -1006,14 +1023,10 @@ class USDRobot:
 				# Set up the joint connections
 				joint.parent = parent_link
 				joint.children.append(child_link)
-				joint.align_to_world()
 				child_link.parent = joint
 				
 				# Add joint to parent link
 				parent_link.add_joint(joint)
-    
-				# NOT WORKING FOR LINKS YET
-				# child_link.align_to_world()
 				
 				logger.debug(f"Connected joint {joint.name}: {parent_link.name} -> {child_link.name}")
 		

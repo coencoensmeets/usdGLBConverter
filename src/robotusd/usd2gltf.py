@@ -79,16 +79,13 @@ class USDToGLTFConverter:
         joint_node = {"name": joint.name}
 
         # Use relative transform between parent and this joint
-        print(f"World_self: {joint.transform_world_to_self}")
         parent_joint = joint.parent_joint
         if parent_joint:
-            print(f"world_parent_inverse: {parent_joint.transform_world_to_self.inverse()}")
             relative_transform = parent_joint.transform_world_to_self.inverse() * joint.transform_world_to_self
         else:
             # Root joint - use world transform
             relative_transform = joint.transform_world_to_self
 
-        print(f"From {parent_joint.name if parent_joint else 'World'} to {joint.name} - Relative Transform: {relative_transform}")
         translation, quaternion = self._extract_pose_from_matrix(relative_transform)
         
         # Only add non-identity transforms to reduce file size
